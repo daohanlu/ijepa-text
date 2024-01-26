@@ -10,7 +10,7 @@ data:
   - 1.0
   crop_size: 224
   image_folder: imagenet_full_size/061417/
-  num_workers: 10
+  num_workers: 8
   pin_mem: true
   root_path: $replace_this_with_absolute_path_to_your_datasets_directory
   use_color_distortion: false

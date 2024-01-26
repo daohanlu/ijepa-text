@@ -11,6 +11,7 @@ import sys
 import torch
 
 import src.models.vision_transformer as vit
+import src.models.text_transformer as tet
 from src.utils.schedulers import (
     WarmupCosineSchedule,
     CosineWDSchedule)
@@ -71,17 +72,27 @@ def init_model(
     model_name='vit_base',
     crop_size=224,
     pred_depth=6,
-    pred_emb_dim=384
+    pred_emb_dim=384,
+    n_positions=512,
 ):
-    encoder = vit.__dict__[model_name](
-        img_size=[crop_size],
-        patch_size=patch_size)
-    predictor = vit.__dict__['vit_predictor'](
-        num_patches=encoder.patch_embed.num_patches,
-        embed_dim=encoder.embed_dim,
-        predictor_embed_dim=pred_emb_dim,
-        depth=pred_depth,
-        num_heads=encoder.num_heads)
+    if 'vit' in model_name:
+        encoder = vit.__dict__[model_name](
+            img_size=[crop_size],
+            patch_size=patch_size)
+        predictor = vit.__dict__['vit_predictor'](
+            num_patches=encoder.patch_embed.num_patches,
+            embed_dim=encoder.embed_dim,
+            predictor_embed_dim=pred_emb_dim,
+            depth=pred_depth,
+            num_heads=encoder.num_heads)
+    else:
+        encoder = tet.__dict__[model_name](n_positions=n_positions)
+        predictor = tet.__dict__['tet_predictor'](
+            n_positions=n_positions,
+            embed_dim=encoder.embed_dim,
+            predictor_embed_dim=pred_emb_dim,
+            depth=pred_depth,
+            num_heads=encoder.num_heads)
 
     def init_weights(m):
         if isinstance(m, torch.nn.Linear):
