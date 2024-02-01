@@ -1,5 +1,5 @@
 data:
-  batch_size: 1  # 128
+  batch_size: 32  # 128
   input_length: 512
   mlm_probability: 0.15
   mean_noise_span_length: 3.0
@@ -34,7 +34,9 @@ optimization:
   ema:
   - 0.996
   - 1.0
-  epochs: 300
+  epochs: 12
+#  iterations_per_epoch: 20
+  iterations_per_epoch: 5000
   final_lr: 1.0e-06
   final_weight_decay: 0.4
   ipe_scale: 1.0

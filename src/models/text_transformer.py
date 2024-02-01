@@ -33,7 +33,8 @@ class TextTransformerPredictor(VisionTransformerPredictor):
         self.n_positions = n_positions
         del self.predictor_pos_embed
         # Changed to fixed from learnable in ViT
-        self.predictor_pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.predictor_embed.out_features)
+        predictor_pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.predictor_embed.out_features)
+        self.register_buffer('predictor_pos_embed', predictor_pos_embed)
 
     def forward(self, x, masks_x, masks):
         assert (masks is not None) and (masks_x is not None), 'Cannot run predictor without mask indices'
@@ -96,7 +97,9 @@ class TextTransformer(VisionTransformer):
         self.n_positions = n_positions
         self.token_embed = nn.Embedding(vocab_size, self.embed_dim)
         # Changed to fixed from learnable in ViT
-        self.pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.embed_dim)  # (1, num_patches, embed_dim)
+        pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.embed_dim)  # (1, num_patches, embed_dim)
+        # register buffer so this gets sent to GPU when calling .cuda().
+        self.register_buffer('pos_embed', pos_embed)
 
     def forward(self, x, masks=None):
         if masks is not None:
@@ -113,11 +116,9 @@ class TextTransformer(VisionTransformer):
         assert x.shape[2] == self.pos_embed.shape[2]  # assert sequence dim is equal to positional embedding dim
         x = x + self.pos_embed[:, :N, :]
 
-        print('text_transformers: x.shape before mask', x.shape)
         # -- mask x
         if masks is not None:
             x = x[masks].reshape(B, -1, D)
-        print('text_transformers: x.shape after mask', x.shape)
         # -- fwd prop
         for i, blk in enumerate(self.blocks):
             x = blk(x)

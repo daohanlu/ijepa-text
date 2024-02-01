@@ -100,30 +100,3 @@ def make_c4(
         persistent_workers=False)
     logger.info('C4 dataset created')
     return dataset, None, data_loader
-
-
-def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_span_length):
-    """
-    Modified to compute lengths assume we replace each length-N masked span with N mask tokens
-    [Copied from https://github.com/huggingface/transformers/blob/main/examples/flax/language-modeling/run_t5_mlm_flax.py]
-    Training parameters to avoid padding with random_spans_noise_mask.
-    When training a model with random_spans_noise_mask, we would like to set the other
-    training hyperparmeters in a way that avoids padding.
-    This function helps us compute these hyperparameters.
-    We assume that each noise span in the input is replaced by extra_tokens_per_span_inputs sentinel tokens,
-    and each non-noise span in the targets is replaced by extra_tokens_per_span_targets sentinel tokens.
-    This function tells us the required number of tokens in the raw example (for split_tokens())
-    as well as the length of the encoded targets. Note that this function assumes
-    the inputs and targets will have EOS appended and includes that in the reported length.
-
-    Args:
-        inputs_length: an integer - desired length of the tokenized inputs sequence
-        noise_density: a float
-        mean_noise_span_length: a float
-    Returns:
-        tokens_length: length of original text in tokens
-        targets_length: an integer - length in tokens of encoded targets sequence
-    """
-    targets_length = int(round(inputs_length * noise_density))
-    # subtract 1 to accommodate the EOS token.
-    return inputs_length - 1, targets_length - 1

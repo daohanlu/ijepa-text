@@ -47,6 +47,13 @@ def append_eos(input_ids: torch.Tensor, eos_token_id) -> torch.Tensor:
     )
 
 
+def append_false(mask_indices: torch.Tensor) -> torch.Tensor:
+    batch_size = mask_indices.shape[0]
+    return torch.concatenate(
+        [mask_indices, torch.full((batch_size, 1), False, dtype=torch.bool)], dim=-1
+    )
+
+
 def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_span_length):
     """This function is copy of `random_spans_helper <https://github.com/google-research/text-to-text-transfer-transformer/blob/84f8bcc14b5f2c03de51bd3587609ba8f6bbd1cd/t5/data/preprocessors.py#L2466>`__ .
 
@@ -132,9 +139,9 @@ class MyDataCollatorForT5MLM:
         batch_size, expandend_input_length = input_ids.shape
 
         mask_indices = torch.stack([self.random_spans_noise_mask(expandend_input_length) for i in range(batch_size)])
-        print('input_ids', input_ids.shape, 'mask shape', mask_indices.shape)
-        batch['noise_mask'] = mask_indices  # True where tokens are masked
-        batch['non_noise_mask'] = ~mask_indices  # True where tokens are not masked
+        # We append False to the noise mask to indicate we never mask the ending EOS token
+        batch['noise_mask'] = append_false(mask_indices)  # True where tokens are masked
+        batch['non_noise_mask'] = append_false(~mask_indices)  # True where tokens are not masked
         batch['input_ids'] = append_eos(input_ids, self.tokenizer.eos_token_id)
         labels = input_ids[mask_indices].reshape(batch_size, -1)
         batch['labels'] = append_eos(labels, self.tokenizer.eos_token_id)
@@ -253,8 +260,8 @@ def main():
     import os
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = get_tokenizer()
-    num_workers=8
-    tokenizer.mask_token = 32000
+    num_workers = 8
+    # tokenizer.mask_token = 32000
     input_length = 512
     mlm_probability = 0.15
     mean_noise_span_length = 3.0
@@ -295,7 +302,7 @@ def main():
                                       input_length=input_length,
                                       target_length=target_length,
                                       pad_token_id=tokenizer.pad_token_id,
-                                      decoder_start_token_id=tokenizer.pad_token_id,)
+                                      decoder_start_token_id=tokenizer.pad_token_id, )
     data_loader = torch.utils.data.DataLoader(
         dataset,
         collate_fn=collator,

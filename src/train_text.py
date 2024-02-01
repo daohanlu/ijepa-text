@@ -7,10 +7,10 @@
 
 import os
 
+import decorator
 from transformers import DataCollatorForLanguageModeling
 
-from src.masks.data_collator import MyDataCollatorForLanguageModeling
-from src.masks.text_span import MyDataCollatorForT5MLM
+from src.masks.my_collators import MyDataCollatorForT5MLM
 
 # -- FOR DISTRIBUTED TRAINING ENSURE ONLY 1 DEVICE VISIBLE PER PROCESS
 try:
@@ -46,7 +46,8 @@ from src.utils.logging import (
     grad_logger,
     AverageMeter)
 from src.utils.tensors import repeat_interleave_batch
-from src.datasets.c4 import make_c4, compute_input_and_target_lengths, get_tokenizer
+from src.datasets.c4 import make_c4, get_tokenizer
+from src.masks.my_collators import compute_input_and_target_lengths
 
 from src.helper import (
     load_checkpoint,
@@ -57,7 +58,7 @@ from src.transforms import make_transforms
 # --
 log_timings = True
 log_freq = 10
-checkpoint_freq = 50
+checkpoint_freq = 1
 # --
 
 _GLOBAL_SEED = 0
@@ -77,21 +78,13 @@ def load_batch(batch, device):
 
 
 def load_batch_2(batch, device):
-    unmasked_input_ids = batch['unmasked_input_ids'].to(device, non_blocking=True)
+    unmasked_input_ids = batch['input_ids'].to(device, non_blocking=True)
     labels = batch['labels'].to(device, non_blocking=True)
-    masked_indices = batch['masked_indices'].to(device, non_blocking=True)
-    print('batch unmasked_input_ids shape', unmasked_input_ids.shape)
-    print('batch labels shape', labels.shape)
-    print('batch masked_indices shape', masked_indices.shape)
-    print('batch unmasked_input_ids', unmasked_input_ids[0])
-    print('batch labels', labels[0])
-    print('batch masked_indices', masked_indices[0])
-    print('batch attention_mask', batch['attention_mask'][0])
-    return unmasked_input_ids, labels, masked_indices
+    noise_mask = batch['noise_mask'].to(device, non_blocking=True)
+    return unmasked_input_ids, labels, noise_mask
 
 
 def main(args, resume_preempt=False):
-
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
     # ----------------------------------------------------------------------- #
@@ -136,6 +129,7 @@ def main(args, resume_preempt=False):
     wd = float(args['optimization']['weight_decay'])
     final_wd = float(args['optimization']['final_weight_decay'])
     num_epochs = args['optimization']['epochs']
+    iterations_per_epoch = args['optimization']['iterations_per_epoch']
     warmup = args['optimization']['warmup']
     start_lr = args['optimization']['start_lr']
     lr = args['optimization']['lr']
@@ -146,6 +140,7 @@ def main(args, resume_preempt=False):
     tag = args['logging']['write_tag']
 
     dump = os.path.join(folder, 'params-ijepa.yaml')
+    os.makedirs(folder, exist_ok=True)
     with open(dump, 'w') as f:
         yaml.dump(args, f)
     # ----------------------------------------------------------------------- #
@@ -180,7 +175,7 @@ def main(args, resume_preempt=False):
 
     # -- init model
     tokenizer = get_tokenizer()
-    tokenizer.mask_token = 32000
+    # tokenizer.mask_token = 32000
     encoder, predictor = init_model(
         device=device,
         pred_depth=pred_depth,
@@ -195,34 +190,33 @@ def main(args, resume_preempt=False):
         noise_density=mlm_probability,
         mean_noise_span_length=mean_noise_span_length,
     )
-    before_mask_input_length = input_length
     logger.info(f'input length: {input_length}; before_mask_input_length: {before_mask_input_length}, '
                 f'target_length: {target_length}.')
+    logger.info(f'device: {device}, encoder device: {next(encoder.parameters()).device},'
+                f' predictor device: {next(predictor.parameters()).device}')
 
-    # span_collator = MyDataCollatorForT5MLM(
-    #     noise_density=mlm_probability,
-    #     mean_noise_span_length=mean_noise_span_length,
-    #     input_length=before_mask_input_length,
-    #     target_length=target_length,
-    #     pad_token_id=0,
-    # )
-    text_collator = MyDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=0.15)
+    text_collator = MyDataCollatorForT5MLM(tokenizer=tokenizer,
+                                           noise_density=mlm_probability,
+                                           mean_noise_span_length=mean_noise_span_length,
+                                           input_length=input_length,
+                                           target_length=target_length,
+                                           pad_token_id=tokenizer.pad_token_id,
+                                           decoder_start_token_id=tokenizer.pad_token_id, )
 
     # -- init data-loaders/samplers
     dataset, _, dataloader = make_c4(
-            batch_size=batch_size,
-            collator=text_collator,
-            pin_mem=pin_mem,
-            training=True,
-            num_workers=num_workers,
-            world_size=world_size,
-            rank=rank,
-            drop_last=True,
-            before_mask_input_length=before_mask_input_length,
-            tokenizer=tokenizer
+        batch_size=batch_size,
+        collator=text_collator,
+        pin_mem=pin_mem,
+        training=True,
+        num_workers=num_workers,
+        world_size=world_size,
+        rank=rank,
+        drop_last=True,
+        before_mask_input_length=before_mask_input_length,
+        tokenizer=tokenizer
     )
-    # ipe = len(unsupervised_loader)
-    ipe = 10000
+    ipe = iterations_per_epoch
 
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
@@ -246,8 +240,8 @@ def main(args, resume_preempt=False):
         p.requires_grad = False
 
     # -- momentum schedule
-    momentum_scheduler = (ema[0] + i*(ema[1]-ema[0])/(ipe*num_epochs*ipe_scale)
-                          for i in range(int(ipe*num_epochs*ipe_scale)+1))
+    momentum_scheduler = (ema[0] + i * (ema[1] - ema[0]) / (ipe * num_epochs * ipe_scale)
+                          for i in range(int(ipe * num_epochs * ipe_scale) + 1))
 
     start_epoch = 0
     # -- load training checkpoint
@@ -260,7 +254,7 @@ def main(args, resume_preempt=False):
             target_encoder=target_encoder,
             opt=optimizer,
             scaler=scaler)
-        for _ in range(start_epoch*ipe):
+        for _ in range(start_epoch * ipe):
             scheduler.step()
             wd_scheduler.step()
             next(momentum_scheduler)
@@ -285,6 +279,8 @@ def main(args, resume_preempt=False):
                 torch.save(save_dict, save_path.format(epoch=f'{epoch + 1}'))
 
     # -- TRAINING LOOP
+    itr = 0
+    dataloader_iterator = iter(dataloader)
     for epoch in range(start_epoch, num_epochs):
         logger.info('Epoch %d' % (epoch + 1))
 
@@ -296,16 +292,18 @@ def main(args, resume_preempt=False):
         maskB_meter = AverageMeter()
         time_meter = AverageMeter()
 
-        # for itr, batch in enumerate(unsupervised_loader):
-        for itr, batch in enumerate(dataloader):
-            logger.info('batch keys' + str(list(batch.keys())))
+        # for itr, batch in enumerate(dataloader):
+        current_ema_momentum = 0
+        for _ in range(ipe):
+            batch = next(dataloader_iterator)
             # masked_input_ids, unmasked_input_ids, target_ids = load_batch(batch, device)
             # masked_indices: A bool Tensor (B x sequence_length) set to True when the token is masked out.
-            unmasked_input_ids, labels, masked_indices = load_batch_2(batch, device)
+            unmasked_input_ids, labels, noise_mask = load_batch_2(batch, device)
 
             def train_step():
                 _new_lr = scheduler.step()
                 _new_wd = wd_scheduler.step()
+
                 # --
 
                 def forward_target():
@@ -315,15 +313,15 @@ def main(args, resume_preempt=False):
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
                         # -- create targets (masked regions of h)
                         B, N, D = h.shape
-                        h = h[masked_indices].reshape(B, -1, D)
-                        h = repeat_interleave_batch(h, B, repeat=len(masked_indices))
+                        h = h[noise_mask].reshape(B, -1, D)
+                        # h = repeat_interleave_batch(h, B, repeat=len(noise_mask))
                         return h
 
                 def forward_context():
                     # encoder mask: not masked_indices;
-                    z = encoder(unmasked_input_ids, ~masked_indices)
+                    z = encoder(unmasked_input_ids, ~noise_mask)
                     # encoder mask: not masked_indices; decoder mask: masked_indices
-                    z = predictor(z, ~masked_indices, masked_indices)
+                    z = predictor(z, ~noise_mask, noise_mask)
                     return z
 
                 def loss_fn(z, h):
@@ -332,9 +330,16 @@ def main(args, resume_preempt=False):
                     return loss
 
                 # Step 1. Forward
-                with torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16):
+                with (torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16)):
                     h = forward_target()
                     z = forward_context()
+                    # shape sanity checks: number of tokens predicted should be target_length - 1
+                    B, N, D = h.shape
+                    assert B == batch_size and N == target_length - 1, \
+                        f'h shape should be {(batch_size, target_length - 1, "*")}, but got {h.shape}!'
+                    B, N, D = z.shape
+                    assert B == batch_size and N == target_length - 1, \
+                        f'z shape should be {(batch_size, target_length - 1, "*")}, but got {z.shape}!'
                     loss = loss_fn(z, h)
 
                 #  Step 2. Backward & step
@@ -352,10 +357,11 @@ def main(args, resume_preempt=False):
                 with torch.no_grad():
                     m = next(momentum_scheduler)
                     for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
-                        param_k.data.mul_(m).add_((1.-m) * param_q.detach().data)
+                        param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
-                return float(loss), _new_lr, _new_wd, grad_stats
-            (loss, _new_lr, _new_wd, grad_stats), etime = gpu_timer(train_step)
+                return float(loss), _new_lr, _new_wd, grad_stats, m
+
+            (loss, _new_lr, _new_wd, grad_stats, current_ema_momentum), etime = gpu_timer(train_step)
             loss_meter.update(loss)
             time_meter.update(etime)
 
@@ -374,7 +380,7 @@ def main(args, resume_preempt=False):
                                    maskB_meter.avg,
                                    _new_wd,
                                    _new_lr,
-                                   torch.cuda.max_memory_allocated() / 1024.**2,
+                                   torch.cuda.max_memory_allocated() / 1024. ** 2,
                                    time_meter.avg))
 
                     if grad_stats is not None:
@@ -386,12 +392,12 @@ def main(args, resume_preempt=False):
                                        grad_stats.max))
 
             log_stats()
-
+            itr += 1
             assert not np.isnan(loss), 'loss is nan'
 
         # -- Save Checkpoint after every epoch
-        logger.info('avg. loss %.3f' % loss_meter.avg)
-        save_checkpoint(epoch+1)
+        logger.info(f'avg. loss: {loss_meter.avg:.3f}. Current EMA weight: {current_ema_momentum:.6f}')
+        save_checkpoint(epoch + 1)
 
 
 if __name__ == "__main__":
