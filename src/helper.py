@@ -74,6 +74,7 @@ def init_model(
     pred_depth=6,
     pred_emb_dim=384,
     n_positions=512,
+    predictor_last_layer_norm=True,
 ):
     if 'vit' in model_name:
         encoder = vit.__dict__[model_name](
@@ -86,13 +87,15 @@ def init_model(
             depth=pred_depth,
             num_heads=encoder.num_heads)
     else:
+        assert 'tet' in model_name
         encoder = tet.__dict__[model_name](n_positions=n_positions)
         predictor = tet.__dict__['tet_predictor'](
             n_positions=n_positions,
             embed_dim=encoder.embed_dim,
             predictor_embed_dim=pred_emb_dim,
             depth=pred_depth,
-            num_heads=encoder.num_heads)
+            num_heads=encoder.num_heads,
+            predictor_last_layer_norm=predictor_last_layer_norm)
 
     def init_weights(m):
         if isinstance(m, torch.nn.Linear):

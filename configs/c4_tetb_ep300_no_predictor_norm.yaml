@@ -6,7 +6,7 @@ data:
   num_workers: 0  # 16
   pin_mem: true
 logging:
-  folder: logs/c4-tetb-bs.2048-ep.12-clip-1.0/
+  folder: logs/c4-tetb-bs.2048-ep.12-no.pred.norm/
   write_tag: ijepa-text
 mask:
   allow_overlap: false
@@ -28,7 +28,7 @@ meta:
   model_name: tet_base
   pred_depth: 12
   pred_emb_dim: 384
-  pred_last_layer_norm: true
+  pred_last_layer_norm: false
   read_checkpoint: null
   use_bfloat16: true
 optimization:
@@ -45,4 +45,4 @@ optimization:
   start_lr: 0.0002
   warmup: 40
   weight_decay: 0.04
-  clip_grad_norm: 1.0
+  clip_grad_norm: -1

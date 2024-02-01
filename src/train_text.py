@@ -96,6 +96,7 @@ def main(args, resume_preempt=False):
     r_file = args['meta']['read_checkpoint']
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
+    pred_last_layer_norm = args['meta']['pred_emb_dim']
     if not torch.cuda.is_available():
         device = torch.device('cpu')
     else:
@@ -134,6 +135,7 @@ def main(args, resume_preempt=False):
     start_lr = args['optimization']['start_lr']
     lr = args['optimization']['lr']
     final_lr = args['optimization']['final_lr']
+    clip_grad_norm = args['optimization']['clip_grad_norm']
 
     # -- LOGGING
     folder = args['logging']['folder']
@@ -180,6 +182,7 @@ def main(args, resume_preempt=False):
         device=device,
         pred_depth=pred_depth,
         pred_emb_dim=pred_emb_dim,
+        predictor_last_layer_norm=pred_last_layer_norm,
         model_name=model_name,
         n_positions=input_length
     )
@@ -345,10 +348,16 @@ def main(args, resume_preempt=False):
                 #  Step 2. Backward & step
                 if use_bfloat16:
                     scaler.scale(loss).backward()
+                    if clip_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
+                        torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
                     scaler.step(optimizer)
                     scaler.update()
                 else:
                     loss.backward()
+                    if clip_grad_norm > 0:
+                        torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
+                        torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
                     optimizer.step()
                 grad_stats = grad_logger(encoder.named_parameters())
                 optimizer.zero_grad()

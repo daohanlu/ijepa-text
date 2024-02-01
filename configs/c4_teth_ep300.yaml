@@ -28,6 +28,7 @@ meta:
   model_name: tet_huge
   pred_depth: 12
   pred_emb_dim: 384
+  pred_last_layer_norm: true
   read_checkpoint: null
   use_bfloat16: true
 optimization:
@@ -44,3 +45,4 @@ optimization:
   start_lr: 0.0002
   warmup: 40
   weight_decay: 0.04
+  clip_grad_norm: 1.0

@@ -234,6 +234,7 @@ class VisionTransformerPredictor(nn.Module):
         drop_path_rate=0.0,
         norm_layer=nn.LayerNorm,
         init_std=0.02,
+        predictor_last_layer_norm=True,
         **kwargs
     ):
         super().__init__()
@@ -253,7 +254,10 @@ class VisionTransformerPredictor(nn.Module):
                 dim=predictor_embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
             for i in range(depth)])
-        self.predictor_norm = norm_layer(predictor_embed_dim)
+        if predictor_last_layer_norm:
+            self.predictor_norm = norm_layer(predictor_embed_dim)
+        else:
+            self.predictor_norm = nn.Identity()
         self.predictor_proj = nn.Linear(predictor_embed_dim, embed_dim, bias=True)
         # ------
         self.init_std = init_std
