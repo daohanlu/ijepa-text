@@ -7,6 +7,9 @@
 
 import os
 
+from transformers import DataCollatorForLanguageModeling
+
+from src.masks.data_collator import MyDataCollatorForLanguageModeling
 from src.masks.text_span import MyDataCollatorForT5MLM
 
 # -- FOR DISTRIBUTED TRAINING ENSURE ONLY 1 DEVICE VISIBLE PER PROCESS
@@ -71,6 +74,20 @@ def load_batch(batch, device):
     unmasked_input_ids = batch['unmasked_input_ids'].to(device, non_blocking=True)
     target_ids = batch['target_ids'].to(device, non_blocking=True)
     return masked_input_ids, unmasked_input_ids, target_ids
+
+
+def load_batch_2(batch, device):
+    unmasked_input_ids = batch['unmasked_input_ids'].to(device, non_blocking=True)
+    labels = batch['labels'].to(device, non_blocking=True)
+    masked_indices = batch['masked_indices'].to(device, non_blocking=True)
+    print('batch unmasked_input_ids shape', unmasked_input_ids.shape)
+    print('batch labels shape', labels.shape)
+    print('batch masked_indices shape', masked_indices.shape)
+    print('batch unmasked_input_ids', unmasked_input_ids[0])
+    print('batch labels', labels[0])
+    print('batch masked_indices', masked_indices[0])
+    print('batch attention_mask', batch['attention_mask'][0])
+    return unmasked_input_ids, labels, masked_indices
 
 
 def main(args, resume_preempt=False):
@@ -163,6 +180,7 @@ def main(args, resume_preempt=False):
 
     # -- init model
     tokenizer = get_tokenizer()
+    tokenizer.mask_token = 32000
     encoder, predictor = init_model(
         device=device,
         pred_depth=pred_depth,
@@ -177,21 +195,23 @@ def main(args, resume_preempt=False):
         noise_density=mlm_probability,
         mean_noise_span_length=mean_noise_span_length,
     )
+    before_mask_input_length = input_length
     logger.info(f'input length: {input_length}; before_mask_input_length: {before_mask_input_length}, '
                 f'target_length: {target_length}.')
 
-    span_collator = MyDataCollatorForT5MLM(
-        noise_density=mlm_probability,
-        mean_noise_span_length=mean_noise_span_length,
-        input_length=before_mask_input_length,
-        target_length=target_length,
-        pad_token_id=0,
-    )
+    # span_collator = MyDataCollatorForT5MLM(
+    #     noise_density=mlm_probability,
+    #     mean_noise_span_length=mean_noise_span_length,
+    #     input_length=before_mask_input_length,
+    #     target_length=target_length,
+    #     pad_token_id=0,
+    # )
+    text_collator = MyDataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=0.15)
 
     # -- init data-loaders/samplers
     dataset, _, dataloader = make_c4(
             batch_size=batch_size,
-            collator=span_collator,
+            collator=text_collator,
             pin_mem=pin_mem,
             training=True,
             num_workers=num_workers,
@@ -279,7 +299,9 @@ def main(args, resume_preempt=False):
         # for itr, batch in enumerate(unsupervised_loader):
         for itr, batch in enumerate(dataloader):
             logger.info('batch keys' + str(list(batch.keys())))
-            masked_input_ids, unmasked_input_ids, target_ids = load_batch(batch, device)
+            # masked_input_ids, unmasked_input_ids, target_ids = load_batch(batch, device)
+            # masked_indices: A bool Tensor (B x sequence_length) set to True when the token is masked out.
+            unmasked_input_ids, labels, masked_indices = load_batch_2(batch, device)
 
             def train_step():
                 _new_lr = scheduler.step()
@@ -289,15 +311,19 @@ def main(args, resume_preempt=False):
                 def forward_target():
                     with torch.no_grad():
                         h = target_encoder(unmasked_input_ids)
-                        h_before_norm = h.detach().copy()
+                        h_before_norm = h.detach().clone()
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
-                        # I THINK TARGET ENCODER'S OUTPUT IS ALREADY NORMALIZED
-                        assert torch.allclose(h.detach(), h_before_norm)
+                        # -- create targets (masked regions of h)
+                        B, N, D = h.shape
+                        h = h[masked_indices].reshape(B, -1, D)
+                        h = repeat_interleave_batch(h, B, repeat=len(masked_indices))
                         return h
 
                 def forward_context():
-                    z = encoder(masked_input_ids)
-                    z = predictor(z, masks_enc, masks_pred)
+                    # encoder mask: not masked_indices;
+                    z = encoder(unmasked_input_ids, ~masked_indices)
+                    # encoder mask: not masked_indices; decoder mask: masked_indices
+                    z = predictor(z, ~masked_indices, masked_indices)
                     return z
 
                 def loss_fn(z, h):

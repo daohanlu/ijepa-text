@@ -4,6 +4,7 @@ from logging import getLogger
 import datasets
 import torch
 from transformers import AutoTokenizer, PreTrainedTokenizer
+import numpy as np
 
 logger = getLogger()
 
@@ -21,13 +22,23 @@ def get_tokenizer(model_name='google/t5-v1_1-base'):
 def tokenize_function(examples, tokenizer, in_length):
     tokenizer_out = tokenizer(
         text=examples["text"],
-        padding='longest',
-        max_length=in_length,
-        truncation=True,
         return_attention_mask=False,
-        return_tensors='pt',
     )
-    result = {"input_ids": tokenizer_out["input_ids"]}
+    input_ids = tokenizer_out["input_ids"]
+    concatenated_ids = np.concatenate(input_ids)
+    total_length = concatenated_ids.shape[0]
+    total_length = (total_length // in_length) * in_length
+    concatenated_ids = concatenated_ids[:total_length].reshape(-1, in_length)
+    result = {"input_ids": torch.from_numpy(concatenated_ids)}
+    # tokenizer_out = tokenizer(
+    #     text=examples["text"],
+    #     padding='longest',
+    #     max_length=in_length,
+    #     truncation=True,
+    #     return_attention_mask=False,
+    #     return_tensors='pt',
+    # )
+    # result = {"input_ids": tokenizer_out["input_ids"]}
     return result
 
 

@@ -294,7 +294,7 @@ class VisionTransformerPredictor(nn.Module):
         # -- Batch Size
         B = len(x) // len(masks_x)
 
-        # -- map from encoder-dim to pedictor-dim
+        # -- map from encoder-dim to predictor-dim
         x = self.predictor_embed(x)
 
         # -- add positional embedding to x tokens

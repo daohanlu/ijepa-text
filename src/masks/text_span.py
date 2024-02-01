@@ -43,36 +43,55 @@ class MyDataCollatorForT5MLM:
     input_length: int
     target_length: int
     pad_token_id: int
+    eos_token_id: int
+    mask_token_id: int = 32000
 
     def __call__(self, batch: List[Dict[str, torch.Tensor]]) -> BatchEncoding:
         # convert list to dict and tensorize input
-        print('batch before collate', batch)
         batch = torch.utils.data.default_collate(batch)
-        print('batch after collate', batch)
         input_ids = batch["input_ids"]
+        # batch['unmasked_input_ids'] = input_ids.clone()
+        print('batch["input_ids"] shape after collate', input_ids.shape)
         batch_size, expandend_input_length = input_ids.shape
 
-        mask = torch.cat([self.random_spans_noise_mask(expandend_input_length) for i in range(batch_size)])
-        print('mask dtype', mask.dtype)
-        batch['mask'] = mask
-        batch['labels_mask'] = ~mask
-        # use 32000 as the mask token
-        batch['masked_input_ids'] = torch.where(mask, input_ids, 32000)
-        batch['labels'] = input_ids[mask]
+        mask = torch.stack([self.random_spans_noise_mask(expandend_input_length) for i in range(batch_size)], dim=0)
+        batch['mask'] = mask  # True where tokens are masked
+        batch['non_noise_mask'] = ~mask  # True where tokens are not masked
+        print('mask shape', mask.shape)
+        # Replace tokens with shared mask token id
+        batch['input_ids'] = self.filter_input_ids(input_ids, ~mask)
+        batch['labels'] = input_ids[mask].reshape(batch_size, -1)
         print('batch after extras', batch)
+        print('batch["labels"] shape', batch['labels'].shape)
+        print('number of masked out tokens', (batch['input_ids'] == self.mask_token_id).sum(-1))
         if batch["input_ids"].shape[-1] != self.input_length:
             raise ValueError(
                 f"`input_ids` are incorrectly preprocessed. `input_ids` length is {batch['input_ids'].shape[-1]}, but"
                 f" should be {self.input_length}."
             )
-
-        if batch["labels_mask"].sum(-1) != self.target_length:
+        if batch["labels"].shape[-1] != self.target_length:
             raise ValueError(
                 f"`labels` are incorrectly preprocessed. `labels` length is {batch['labels'].shape[-1]}, but should be"
                 f" {self.target_length}."
             )
 
         return batch
+
+    def concatenate_eos(self, input_ids):
+        """ Puts an eos token at the end of every sequence """
+
+    def filter_input_ids(self, input_ids, mask):
+        """
+        Puts sentinel mask on `input_ids` and fuse consecutive mask tokens into a single mask token by deleting.
+        This will reduce the sequence length from `expanded_inputs_length` to `input_length`.
+        """
+        batch_size = input_ids.shape[0]
+        input_ids = input_ids[mask].reshape(batch_size, -1)
+        # add in eos token
+        input_ids = torch.concatenate(
+            [input_ids, torch.full((batch_size, 1), self.eos_token_id, dtype=torch.int32)], dim=-1
+        )
+        return input_ids
 
     def random_spans_noise_mask(self, length):
         """This function is copy of `random_spans_helper <https://github.com/google-research/text-to-text-transfer-transformer/blob/84f8bcc14b5f2c03de51bd3587609ba8f6bbd1cd/t5/data/preprocessors.py#L2682>`__ .
@@ -135,6 +154,4 @@ class MyDataCollatorForT5MLM:
         span_start_indicator[span_starts] = True
         span_num = np.cumsum(span_start_indicator)
         is_noise = np.equal(span_num % 2, 1)
-        print('is_noise dtype', is_noise.dtype)
-        print('is_noise tensor dtype', torch.Tensor(is_noise[:orig_length]).dtype)
         return torch.from_numpy(is_noise[:orig_length])

@@ -1,9 +1,9 @@
 data:
-  batch_size: 128
+  batch_size: 1  # 128
   input_length: 512
   mlm_probability: 0.15
   mean_noise_span_length: 3.0
-  num_workers: 0
+  num_workers: 0  # 16
   pin_mem: true
 logging:
   folder: logs/c4-vith14.224-bs.2048-ep.300/
@@ -25,7 +25,7 @@ mask:
   - 0.2
 meta:
   load_checkpoint: false
-  model_name: tet_huge
+  model_name: tet_base  # tet_huge
   pred_depth: 12
   pred_emb_dim: 384
   read_checkpoint: null
