@@ -6,7 +6,7 @@ data:
   num_workers: 0  # 16
   pin_mem: true
 logging:
-  folder: logs/c4-tetb-bs.2048-ep.12-no.pred.norm/
+  folder: logs/c4-tetb-bs.32-ep.12-no.pred.norm-warmup.1/
   write_tag: ijepa-text
 mask:
   allow_overlap: false
@@ -43,6 +43,6 @@ optimization:
   ipe_scale: 1.0
   lr: 0.001
   start_lr: 0.0002
-  warmup: 40
+  warmup: 1
   weight_decay: 0.04
   clip_grad_norm: -1

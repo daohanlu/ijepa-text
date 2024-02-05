@@ -116,6 +116,7 @@ def init_model(
     encoder.to(device)
     predictor.to(device)
     logger.info(encoder)
+    logger.info(predictor)
     return encoder, predictor
 
 

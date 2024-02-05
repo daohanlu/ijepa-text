@@ -96,7 +96,7 @@ def main(args, resume_preempt=False):
     r_file = args['meta']['read_checkpoint']
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
-    pred_last_layer_norm = args['meta']['pred_emb_dim']
+    pred_last_layer_norm = args['meta']['pred_last_layer_norm']
     if not torch.cuda.is_available():
         device = torch.device('cpu')
     else:
@@ -186,6 +186,10 @@ def main(args, resume_preempt=False):
         model_name=model_name,
         n_positions=input_length
     )
+    if bool(pred_last_layer_norm) == False:
+        assert isinstance(predictor.predictor_norm, torch.nn.Identity)
+    else:
+        assert isinstance(predictor.predictor_norm, torch.nn.LayerNorm)
     target_encoder = copy.deepcopy(encoder)
 
     before_mask_input_length, target_length = compute_input_and_target_lengths(
@@ -278,8 +282,8 @@ def main(args, resume_preempt=False):
         }
         if rank == 0:
             torch.save(save_dict, latest_path)
-            if (epoch + 1) % checkpoint_freq == 0:
-                torch.save(save_dict, save_path.format(epoch=f'{epoch + 1}'))
+            if (epoch) % checkpoint_freq == 0:
+                torch.save(save_dict, save_path.format(epoch=f'{epoch}'))
 
     # -- TRAINING LOOP
     itr = 0
