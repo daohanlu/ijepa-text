@@ -112,7 +112,7 @@ class TextTransformer(VisionTransformer):
 
         # -- add positional embedding to x
         # pos_embed = self.interpolate_pos_encoding(x, self.pos_embed)
-        assert x.shape[1] == self.pos_embed.shape[1]  # assert sequence length is equal to positional embedding size
+        assert x.shape[1] <= self.pos_embed.shape[1]  # assert sequence length is <= positional embedding size
         assert x.shape[2] == self.pos_embed.shape[2]  # assert sequence dim is equal to positional embedding dim
         x = x + self.pos_embed[:, :N, :]
 
