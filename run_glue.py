@@ -106,6 +106,9 @@ class DataTrainingArguments:
             )
         },
     )
+    freeze_encoder: bool = field(
+        default=False, metadata={"help": "Whether to freeze the encoder and only train the classifier head."}
+    )
     overwrite_cache: bool = field(
         default=False, metadata={"help": "Overwrite the cached preprocessed datasets or not."}
     )
@@ -458,10 +461,11 @@ def main():
             return hidden_states
 
     class MeanPooledEncoder(torch.nn.Module):
-        def __init__(self, enc: torch.nn.Module, n_labels, *args_, **kwargs_):
+        def __init__(self, enc: torch.nn.Module, n_labels, freeze_encoder=False, *args_, **kwargs_):
             super().__init__(*args_, **kwargs_)
             self.encoder = enc
             self.classification_head = MyT5ClassificationHead(self.encoder.embed_dim, n_labels)
+            self.freeze_encoder = freeze_encoder
 
         def forward(self,
                     input_ids: torch.LongTensor = None,
@@ -479,8 +483,11 @@ def main():
                     output_attentions: Optional[bool] = None,
                     output_hidden_states: Optional[bool] = None,
                     return_dict: Optional[bool] = None,):
-
-            sequence_output = self.encoder(input_ids)
+            if self.freeze_encoder:
+                with torch.no_grad():
+                    sequence_output = self.encoder(input_ids)
+            else:
+                sequence_output = self.encoder(input_ids)
             eos_mask = input_ids.eq(self.config.eos_token_id).to(sequence_output.device)
 
             if len(torch.unique_consecutive(eos_mask.sum(1))) > 1:
@@ -521,7 +528,7 @@ def main():
 
             raise NotImplementedError()
 
-    model = MeanPooledEncoder(encoder, num_labels)
+    model = MeanPooledEncoder(encoder, num_labels, data_args.freeze_encoder)
     model.config = PretrainedConfig(num_labels=num_labels)
     model.config.max_length = data_args.max_seq_length
     model.config.eos_token_id = tokenizer.eos_token_id
