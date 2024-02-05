@@ -522,11 +522,11 @@ def main():
             raise NotImplementedError()
 
     model = MeanPooledEncoder(encoder, num_labels)
-    model.config = PretrainedConfig()
+    model.config = PretrainedConfig(num_labels=num_labels)
     model.config.max_length = data_args.max_seq_length
     model.config.eos_token_id = tokenizer.eos_token_id
-    model.config.label2id = None
-    model.config.id2label = None
+    logger.info(f'model.config.id2label: {model.config.id2label}')
+    logger.info(f'model.config.label2id: {model.config.label2id}')
 
     # Preprocessing the raw_datasets
     if data_args.task_name is not None:
@@ -552,8 +552,7 @@ def main():
     # Some models have set the order of the labels to use, so let's make sure we do use it.
     label_to_id = None
     if (
-            model.config.label2id is not None
-            and model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
+            model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
             and data_args.task_name is not None
             and not is_regression
     ):
