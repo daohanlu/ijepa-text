@@ -57,9 +57,11 @@ if __name__ == '__main__':
 
     num_gpus = len(args.devices)
     mp.set_start_method('spawn')
-
-    for rank in range(num_gpus):
-        mp.Process(
-            target=process_main,
-            args=(rank, args.fname, num_gpus, args.devices)
-        ).start()
+    if num_gpus <= 1:
+        process_main(0, args.fname, num_gpus, args.devices)
+    else:
+        for rank in range(num_gpus):
+            mp.Process(
+                target=process_main,
+                args=(rank, args.fname, num_gpus, args.devices)
+            ).start()

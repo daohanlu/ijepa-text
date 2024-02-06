@@ -8,6 +8,7 @@
 import os
 
 import decorator
+import matplotlib.pyplot as plt
 from transformers import DataCollatorForLanguageModeling
 
 from src.masks.my_collators import MyDataCollatorForT5MLM
@@ -26,6 +27,7 @@ import copy
 import logging
 import sys
 import yaml
+import pdb
 
 import numpy as np
 
@@ -84,12 +86,72 @@ def load_batch_2(batch, device):
     return unmasked_input_ids, labels, noise_mask
 
 
+def make_plot(title, xlabel, ylabel, ys, save_path, scatter=False):
+    # Create a plot of the singular values
+    xs = np.arange(1, len(ys) + 1)
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111)
+    if scatter:
+        ax.scatter(xs, ys, marker='.')
+    else:
+        ax.plot(xs, ys, marker='.')
+    ax.set_title(title)
+    # ax.set_xticks(xs)
+    ax.set_xlim(1 - 1, len(ys) + 1)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    # plt.tight_layout()
+    plt.show()
+    plt.savefig(save_path)
+    plt.close()
+
+
+def off_diagonal(x):
+    # https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py
+    n, m = x.shape
+    assert n == m
+    return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+
+def check_stats(buffer, h, z):
+    """Checks for mode collapse in terms of features
+    h: target features. B x N x D
+    z: predicted features. B x N x D"""
+    h_buffer = buffer['h']
+    z_buffer = buffer['z']
+    h_buffer.append(h.cpu())
+    z_buffer.append(z.cpu())
+    assert len(h_buffer) == len(z_buffer)
+    num_tokens = 0 if len(h_buffer) == 0 else len(h_buffer) * h_buffer[0].shape[0] * h_buffer[0].shape[1]
+    if num_tokens >= 1024*32:
+        logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
+        h = torch.concatenate(h_buffer, dim=0)  # concat into a large batch
+        z = torch.concatenate(z_buffer, dim=0)  # concat into a large batch
+        assert h.shape == z.shape and h.shape[0]*h.shape[1] == num_tokens
+        B, N, D = h.shape
+        h1 = h.reshape(-1, D)
+        var = h1.var(dim=0)
+        cov = h1.T.cov()
+        mu = h1.mean(dim=0)
+        log_det = torch.logdet(cov)
+        U, S, V = torch.svd(cov)
+        L = torch.cholesky(cov)
+        make_plot(f'Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}',
+                  'Sorted Rank', 'Value', S.numpy(), 'plots/singular_values.svg')
+        make_plot(f'Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
+                  'Channel', 'Value', var.numpy(), 'plots/channel_wise_variance.svg', scatter=True)
+        logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
+        pdb.set_trace()
+    else:
+        pass
+
 def main(args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
     #  PASSED IN PARAMS FROM CONFIG FILE
     # ----------------------------------------------------------------------- #
 
     # -- META
+    debug_vic = args['meta']['debug_vic']
     use_bfloat16 = args['meta']['use_bfloat16']
     model_name = args['meta']['model_name']
     load_model = args['meta']['load_checkpoint'] or resume_preempt
@@ -136,6 +198,7 @@ def main(args, resume_preempt=False):
     lr = args['optimization']['lr']
     final_lr = args['optimization']['final_lr']
     clip_grad_norm = args['optimization']['clip_grad_norm']
+    vicreg_coeff = float(args['optimization'].get('vicreg_coeff', 0.0))
 
     # -- LOGGING
     folder = args['logging']['folder']
@@ -265,7 +328,6 @@ def main(args, resume_preempt=False):
             scheduler.step()
             wd_scheduler.step()
             next(momentum_scheduler)
-            mask_collator.step()
 
     def save_checkpoint(epoch):
         save_dict = {
@@ -286,6 +348,7 @@ def main(args, resume_preempt=False):
                 torch.save(save_dict, save_path.format(epoch=f'{epoch}'))
 
     # -- TRAINING LOOP
+    debug_buffer = {'h': [], 'z': []}
     itr = 0
     dataloader_iterator = iter(dataloader)
     for epoch in range(start_epoch, num_epochs):
@@ -333,6 +396,16 @@ def main(args, resume_preempt=False):
 
                 def loss_fn(z, h):
                     loss = F.smooth_l1_loss(z, h)
+                    if vicreg_coeff > 0:
+                        encoder_features = z.mean(dim=1)  # -> (batch_size, hidden_size)
+                        std_x = torch.sqrt(encoder_features.var(dim=0) + 0.0001)  # var over batch dimension
+                        cov_x = (encoder_features.T @ encoder_features) / (batch_size - 1)  # cov over batch dimension
+                        std_loss = torch.mean(F.relu(1 - std_x)) / 2
+                        cov_loss = off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1])  # divide by hidden states dim
+                        # see https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py defaults
+                        var_and_cov_loss = vicreg_coeff * (
+                                    std_loss + 0.04 * cov_loss)  # cov_loss is divided by 25 as per default
+                        loss += var_and_cov_loss
                     loss = AllReduce.apply(loss)
                     return loss
 
@@ -349,20 +422,24 @@ def main(args, resume_preempt=False):
                         f'z shape should be {(batch_size, target_length - 1, "*")}, but got {z.shape}!'
                     loss = loss_fn(z, h)
 
+                if debug_vic:
+                    check_stats(debug_buffer, h.detach(), z.detach())
+
                 #  Step 2. Backward & step
-                if use_bfloat16:
-                    scaler.scale(loss).backward()
-                    if clip_grad_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
-                        torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    if clip_grad_norm > 0:
-                        torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
-                        torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
-                    optimizer.step()
+                if not debug_vic:
+                    if use_bfloat16:
+                        scaler.scale(loss).backward()
+                        if clip_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
+                            torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        if clip_grad_norm > 0:
+                            torch.nn.utils.clip_grad_norm_(encoder.parameters(), clip_grad_norm, norm_type=2.0)
+                            torch.nn.utils.clip_grad_norm_(predictor.parameters(), clip_grad_norm, norm_type=2.0)
+                        optimizer.step()
                 grad_stats = grad_logger(encoder.named_parameters())
                 optimizer.zero_grad()
 
