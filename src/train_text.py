@@ -11,6 +11,7 @@ import decorator
 import matplotlib.pyplot as plt
 from transformers import DataCollatorForLanguageModeling
 
+from src.masks.my_collators import MyDataCollatorForLanguageModeling
 from src.masks.my_collators import MyDataCollatorForT5MLM
 
 # -- FOR DISTRIBUTED TRAINING ENSURE ONLY 1 DEVICE VISIBLE PER PROCESS
@@ -72,18 +73,17 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 logger = logging.getLogger()
 
 
-def load_batch(batch, device):
-    masked_input_ids = batch['masked_input_ids'].to(device, non_blocking=True)
-    unmasked_input_ids = batch['unmasked_input_ids'].to(device, non_blocking=True)
-    target_ids = batch['target_ids'].to(device, non_blocking=True)
-    return masked_input_ids, unmasked_input_ids, target_ids
-
-
-def load_batch_2(batch, device):
-    unmasked_input_ids = batch['input_ids'].to(device, non_blocking=True)
-    labels = batch['labels'].to(device, non_blocking=True)
+def load_batch_t5_mlm(batch, device):
+    uncorrupted_input_ids = batch['input_ids'].to(device, non_blocking=True)
     noise_mask = batch['noise_mask'].to(device, non_blocking=True)
-    return unmasked_input_ids, labels, noise_mask
+    return uncorrupted_input_ids, noise_mask
+
+
+def load_batch_bert_mlm(batch, device):
+    uncorrupted_input_ids = batch['uncorrupted_input_ids'].to(device, non_blocking=True)
+    noise_mask = batch['noise_mask'].to(device, non_blocking=True)
+    input_ids = batch['input_ids'].to(device, non_blocking=True)  # noisy input_ids via BERT-style MLM
+    return uncorrupted_input_ids, noise_mask, input_ids
 
 
 def make_plot(title, xlabel, ylabel, ys, save_path, scatter=False):
@@ -123,11 +123,11 @@ def check_stats(buffer, h, z):
     z_buffer.append(z.cpu())
     assert len(h_buffer) == len(z_buffer)
     num_tokens = 0 if len(h_buffer) == 0 else len(h_buffer) * h_buffer[0].shape[0] * h_buffer[0].shape[1]
-    if num_tokens >= 1024*32:
+    if num_tokens >= 1024 * 32:
         logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
         h = torch.concatenate(h_buffer, dim=0)  # concat into a large batch
         z = torch.concatenate(z_buffer, dim=0)  # concat into a large batch
-        assert h.shape == z.shape and h.shape[0]*h.shape[1] == num_tokens
+        assert h.shape == z.shape and h.shape[0] * h.shape[1] == num_tokens
         B, N, D = h.shape
         h1 = h.reshape(-1, D)
         var = h1.var(dim=0)
@@ -144,6 +144,7 @@ def check_stats(buffer, h, z):
         pdb.set_trace()
     else:
         pass
+
 
 def main(args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
@@ -171,8 +172,9 @@ def main(args, resume_preempt=False):
     pin_mem = args['data']['pin_mem']
     num_workers = args['data']['num_workers']
     input_length = args['data']['input_length']
+    use_bert_mlm = args['data'].get('use_bert_mlm', False)
     mlm_probability = args['data']['mlm_probability']
-    mean_noise_span_length = args['data']['mean_noise_span_length']
+    mean_noise_span_length = args['data'].get('mean_noise_span_length', None)
     # --
 
     # -- MASK
@@ -265,13 +267,21 @@ def main(args, resume_preempt=False):
     logger.info(f'device: {device}, encoder device: {next(encoder.parameters()).device},'
                 f' predictor device: {next(predictor.parameters()).device}')
 
-    text_collator = MyDataCollatorForT5MLM(tokenizer=tokenizer,
-                                           noise_density=mlm_probability,
-                                           mean_noise_span_length=mean_noise_span_length,
-                                           input_length=input_length,
-                                           target_length=target_length,
-                                           pad_token_id=tokenizer.pad_token_id,
-                                           decoder_start_token_id=tokenizer.pad_token_id, )
+    if use_bert_mlm:
+        text_collator = MyDataCollatorForLanguageModeling(tokenizer=tokenizer,
+                                                          mlm_probability=mlm_probability,
+                                                          input_length=input_length,
+                                                          pad_token_id=tokenizer.pad_token_id,
+                                                          decoder_start_token_id=tokenizer.pad_token_id,
+                                                          mask_token_id=tokenizer.vocab_size - 100,)
+    else:
+        text_collator = MyDataCollatorForT5MLM(tokenizer=tokenizer,
+                                               noise_density=mlm_probability,
+                                               mean_noise_span_length=mean_noise_span_length,
+                                               input_length=input_length,
+                                               target_length=target_length,
+                                               pad_token_id=tokenizer.pad_token_id,
+                                               decoder_start_token_id=tokenizer.pad_token_id, )
 
     # -- init data-loaders/samplers
     dataset, _, dataloader = make_c4(
@@ -366,9 +376,11 @@ def main(args, resume_preempt=False):
         current_ema_momentum = 0
         for _ in range(ipe):
             batch = next(dataloader_iterator)
-            # masked_input_ids, unmasked_input_ids, target_ids = load_batch(batch, device)
             # masked_indices: A bool Tensor (B x sequence_length) set to True when the token is masked out.
-            unmasked_input_ids, labels, noise_mask = load_batch_2(batch, device)
+            if use_bert_mlm:
+                uncorrupted_input_ids, noise_mask, input_ids = load_batch_bert_mlm(batch, device)
+            else:
+                uncorrupted_input_ids, noise_mask = load_batch_t5_mlm(batch, device)
 
             def train_step():
                 _new_lr = scheduler.step()
@@ -378,7 +390,7 @@ def main(args, resume_preempt=False):
 
                 def forward_target():
                     with torch.no_grad():
-                        h = target_encoder(unmasked_input_ids)
+                        h = target_encoder(uncorrupted_input_ids)
                         h_before_norm = h.detach().clone()
                         h = F.layer_norm(h, (h.size(-1),))  # normalize over feature-dim
                         # -- create targets (masked regions of h)
@@ -389,9 +401,13 @@ def main(args, resume_preempt=False):
 
                 def forward_context():
                     # encoder mask: not masked_indices;
-                    z = encoder(unmasked_input_ids, ~noise_mask)
-                    # encoder mask: not masked_indices; decoder mask: masked_indices
-                    z = predictor(z, ~noise_mask, noise_mask)
+                    if use_bert_mlm:
+                        z = encoder(input_ids)
+                        # encoder features should be fully visible since to make use of BERT-style masking
+                        z = predictor(z, torch.ones_like(noise_mask), noise_mask)
+                    else:
+                        z = encoder(uncorrupted_input_ids, ~noise_mask)
+                        z = predictor(z, ~noise_mask, noise_mask)
                     return z
 
                 def loss_fn(z, h):
@@ -404,7 +420,7 @@ def main(args, resume_preempt=False):
                         cov_loss = off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1])  # divide by hidden states dim
                         # see https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py defaults
                         var_and_cov_loss = vicreg_coeff * (
-                                    std_loss + 0.04 * cov_loss)  # cov_loss is divided by 25 as per default
+                                std_loss + 0.04 * cov_loss)  # cov_loss is divided by 25 as per default
                         loss += var_and_cov_loss
                     loss = AllReduce.apply(loss)
                     return loss

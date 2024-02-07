@@ -3,13 +3,13 @@ from logging import getLogger
 
 import datasets
 import torch
-from transformers import AutoTokenizer, PreTrainedTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 import numpy as np
 
 logger = getLogger()
 
 
-def get_tokenizer(model_name='google/t5-v1_1-base'):
+def get_tokenizer(model_name='google/t5-v1_1-base') -> PreTrainedTokenizerBase:
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         use_fast=True,
@@ -52,7 +52,7 @@ def make_c4(
         rank=0,
         training=True,
         drop_last=True,
-        tokenizer: PreTrainedTokenizer = None,
+        tokenizer: PreTrainedTokenizerBase = None,
 ):
     split = 'train' if training else 'validation'
     logger.info('Loading C4 dataset with streaming=True')

@@ -22,7 +22,7 @@ https://huggingface.co/models?filter=t5
 import pdb
 from dataclasses import asdict, dataclass, field
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple, Union
 
 import datasets
 import numpy as np
@@ -102,6 +102,7 @@ def compute_input_and_target_lengths(inputs_length, noise_density, mean_noise_sp
 @dataclass
 class MyDataCollatorForT5MLM:
     """
+    Adapted from https://github.com/huggingface/transformers/blob/main/examples/flax/language-modeling/run_t5_mlm_flax.py
     Data collator used for T5 span-masked language modeling.
     It is made sure that after masking the inputs are of length `data_args.max_seq_length` and targets are also of fixed length.
     For more information on how T5 span-masked language modeling works, one can take a look
@@ -134,14 +135,15 @@ class MyDataCollatorForT5MLM:
     decoder_start_token_id: int
 
     def __call__(self, examples: List[Dict[str, np.ndarray]]) -> BatchEncoding:
-        batch = torch.utils.data.default_collate(examples)
+        batch = BatchEncoding(torch.utils.data.default_collate(examples))
         input_ids = batch["input_ids"]
-        batch_size, expandend_input_length = input_ids.shape
+        batch_size, expanded_input_length = input_ids.shape
 
-        mask_indices = torch.stack([self.random_spans_noise_mask(expandend_input_length) for i in range(batch_size)])
+        mask_indices = torch.stack([self.random_spans_noise_mask(expanded_input_length) for i in range(batch_size)])
         # We append False to the noise mask to indicate we never mask the ending EOS token
-        batch['noise_mask'] = append_false(mask_indices)  # True where tokens are masked
-        batch['non_noise_mask'] = append_false(~mask_indices)  # True where tokens are not masked
+        mask_indices = append_false(mask_indices)
+        batch['noise_mask'] = mask_indices  # True where tokens are masked
+        batch['non_noise_mask'] = ~mask_indices  # True where tokens are not masked
         batch['input_ids'] = append_eos(input_ids, self.tokenizer.eos_token_id)
         labels = input_ids[mask_indices].reshape(batch_size, -1)
         batch['labels'] = append_eos(labels, self.tokenizer.eos_token_id)
@@ -157,7 +159,7 @@ class MyDataCollatorForT5MLM:
                 f"`labels` are incorrectly preprocessed. `labels` length is {batch['labels'].shape[-1]}, but should be"
                 f" {self.target_length}."
             )
-
+        assert isinstance(batch, BatchEncoding)
         return batch
 
     def create_sentinel_ids(self, mask_indices):
@@ -256,11 +258,111 @@ class MyDataCollatorForT5MLM:
         return torch.from_numpy(is_noise[:orig_length])
 
 
+@dataclass
+class MyDataCollatorForLanguageModeling:
+    """
+    Adapted from https://github.com/huggingface/transformers/blob/main/examples/flax/language-modeling/run_mlm_flax.py
+    Data collator used for language modeling. Inputs are dynamically padded to the maximum length of a batch if they
+    are not all of the same length.
+
+    Args:
+        tokenizer (:class:`~transformers.PreTrainedTokenizer` or :class:`~transformers.PreTrainedTokenizerFast`):
+            The tokenizer used for encoding the data.
+        mlm_probability (:obj:`float`, `optional`, defaults to 0.15):
+            The probability with which to (randomly) mask tokens in the input.
+        input_length (:obj:`int`):
+            The expected input length after masking.
+        pad_token_id: (:obj:`int`):
+            The pad token id of the model
+        decoder_start_token_id: (:obj:`int):
+            The decoder start token id of the model
+
+    .. note::
+
+        For best performance, this data collator should be used with a dataset having items that are dictionaries or
+        BatchEncoding, with the :obj:`"special_tokens_mask"` key, as returned by a
+        :class:`~transformers.PreTrainedTokenizer` or a :class:`~transformers.PreTrainedTokenizerFast` with the
+        argument :obj:`return_special_tokens_mask=True`.
+    """
+
+    tokenizer: PreTrainedTokenizerBase
+    input_length: int
+    pad_token_id: int
+    decoder_start_token_id: int
+    mask_token_id: int
+    mlm_probability: float = 0.15
+
+    def __call__(self, examples: List[Dict[str, np.ndarray]]) -> BatchEncoding:
+        # Handle dict or lists with proper padding and conversion to tensor.
+        # batch = self.tokenizer.pad(examples, pad_to_multiple_of=pad_to_multiple_of, return_tensors=TensorType.NUMPY)
+
+        # If special token mask has been preprocessed, pop it from the dict.
+        # special_tokens_mask = batch.pop("special_tokens_mask", None)
+        batch = BatchEncoding(torch.utils.data.default_collate(examples))
+        batch['uncorrupted_input_ids'] = append_eos(batch["input_ids"].clone(), self.tokenizer.eos_token_id)
+        batch_size, expanded_input_length = batch["input_ids"].shape
+        batch['input_ids'], _, mask_indices = self.mask_tokens(batch["input_ids"], special_tokens_mask=None)
+        mask_indices = append_false(mask_indices)
+        batch['noise_mask'] = mask_indices  # True where tokens are masked
+        batch['non_noise_mask'] = ~mask_indices  # True where tokens are not masked
+        batch['input_ids'] = append_eos(batch['input_ids'], self.tokenizer.eos_token_id)
+        labels = batch['uncorrupted_input_ids'][mask_indices].reshape(batch_size, -1)
+        batch['labels'] = append_eos(labels, self.tokenizer.eos_token_id)
+        # --- Check final input_ids length ---
+        if batch["input_ids"].shape[-1] != self.input_length:
+            raise ValueError(
+                f"`input_ids` are incorrectly preprocessed. `input_ids` length is {batch['input_ids'].shape[-1]}, but"
+                f" should be {self.input_length}."
+            )
+        assert isinstance(batch, BatchEncoding), \
+            f'Expected batch to be of class BatchEncoder, got {batch.__class__}!'
+        return batch
+
+    @staticmethod
+    def get_mask(B, N, mask_prob):
+        """Returns a random Boolean mask for a batch of sequences where
+        each sequence has N*mask_prob "True" values with the rest being "False"."""
+        num_mask_per_seq = int(round(N * mask_prob))
+        masked_indices = torch.zeros((B, N), dtype=torch.bool)
+        for i in range(B):
+            masked_indices[i][torch.randperm(N)[:num_mask_per_seq]] = True
+        return masked_indices
+
+    def mask_tokens(
+            self, inputs: Union[np.ndarray, torch.Tensor], special_tokens_mask: Optional[np.ndarray]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Prepare masked tokens inputs/labels for masked language modeling: 80% MASK, 10% random, 10% original.
+        """
+        if isinstance(inputs, np.ndarray):
+            inputs = torch.from_numpy(inputs)
+        labels = inputs.clone()
+        B, N = inputs.shape
+        masked_indices = self.get_mask(B, N, self.mlm_probability)
+        labels[~masked_indices] = -100  # We only compute loss on masked tokens
+
+        # 80% of the time, we replace masked input tokens with tokenizer.mask_token ([MASK])
+        indices_replaced = self.get_mask(B, N, 0.8) & masked_indices
+        inputs[indices_replaced] = self.mask_token_id
+
+        # 10% of the time, we replace masked input tokens with random word
+        indices_random = self.get_mask(B, N, 0.5)
+        indices_random &= masked_indices & ~indices_replaced
+
+        random_words = torch.randint(self.tokenizer.vocab_size, size=labels.shape, dtype=inputs.dtype)
+        inputs[indices_random] = random_words[indices_random]
+
+        # The rest of the time (10% of the time) we keep the masked input tokens unchanged
+        return inputs, labels, masked_indices
+
+
 def main():
     import os
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
     tokenizer = get_tokenizer()
-    num_workers = 8
+    print(f'Tokenizer: {tokenizer.__class__}(name_or_path={tokenizer.name_or_path}, vocab_size={tokenizer.vocab_size})'
+          f'. mask_token chosen:{tokenizer.vocab_size - 100}')
+    num_workers = 0
     # tokenizer.mask_token = 32000
     input_length = 512
     mlm_probability = 0.15
@@ -295,21 +397,26 @@ def main():
         },
         remove_columns=['text'],
     )  # this removes column 'text' and adds column 'input_ids' corresponding to converted token IDs.
-    dataset = dataset.shuffle(buffer_size=10_000, seed=42)
-    collator = MyDataCollatorForT5MLM(tokenizer=tokenizer,
-                                      noise_density=mlm_probability,
-                                      mean_noise_span_length=mean_noise_span_length,
-                                      input_length=input_length,
-                                      target_length=target_length,
-                                      pad_token_id=tokenizer.pad_token_id,
-                                      decoder_start_token_id=tokenizer.pad_token_id, )
+    # dataset = dataset.shuffle(buffer_size=10_000, seed=42)
+    # collator = MyDataCollatorForT5MLM(tokenizer=tokenizer,
+    #                                   noise_density=mlm_probability,
+    #                                   mean_noise_span_length=mean_noise_span_length,
+    #                                   input_length=input_length,
+    #                                   target_length=target_length,
+    #                                   pad_token_id=tokenizer.pad_token_id,
+    #                                   decoder_start_token_id=tokenizer.pad_token_id, )
+    collator = MyDataCollatorForLanguageModeling(tokenizer=tokenizer,
+                                                 input_length=input_length,
+                                                 pad_token_id=tokenizer.pad_token_id,
+                                                 decoder_start_token_id=tokenizer.pad_token_id,
+                                                 mask_token_id=tokenizer.vocab_size - 100)
     data_loader = torch.utils.data.DataLoader(
         dataset,
         collate_fn=collator,
         batch_size=8,
         drop_last=True,
         pin_memory=True,
-        num_workers=8,
+        num_workers=num_workers,
         persistent_workers=False)
     for itr, batch in enumerate(data_loader):
         print('batch keys' + str(list(batch.keys())))
