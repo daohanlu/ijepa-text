@@ -424,7 +424,7 @@ def main():
     input_length = args['data']['input_length']
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
-    pred_last_layer_norm = args['meta']['pred_emb_dim']
+    pred_last_layer_norm = args['meta']['pred_last_layer_norm']
 
     encoder, predictor = init_model(
         device=training_args.device,
