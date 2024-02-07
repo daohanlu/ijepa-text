@@ -74,6 +74,8 @@ def init_model(
     crop_size=224,
     pred_depth=6,
     pred_emb_dim=384,
+    is_generative=False,
+    vocab_size=None,
     n_positions=512,
     predictor_last_layer_norm=True,
 ):
@@ -89,11 +91,14 @@ def init_model(
             num_heads=encoder.num_heads)
     else:
         assert 'tet' in model_name
+        assert not is_generative or vocab_size is not None
         encoder = tet.__dict__[model_name](n_positions=n_positions)
         predictor = tet.__dict__['tet_predictor'](
             n_positions=n_positions,
             embed_dim=encoder.embed_dim,
             predictor_embed_dim=pred_emb_dim,
+            is_generative=is_generative,
+            vocab_size=vocab_size,
             depth=pred_depth,
             num_heads=encoder.num_heads,
             predictor_last_layer_norm=predictor_last_layer_norm)

@@ -27,7 +27,7 @@ def get_fixed_1d_pos_embed_pytorch(max_len: int, d_model: int) -> torch.Tensor:
 
 
 class TextTransformerPredictor(VisionTransformerPredictor):
-    def __init__(self, n_positions=512, **kwargs):
+    def __init__(self, n_positions=512, is_generative=False, vocab_size=None, **kwargs):
         kwargs['num_patches'] = 0
         super().__init__(**kwargs)
         self.n_positions = n_positions
@@ -35,6 +35,12 @@ class TextTransformerPredictor(VisionTransformerPredictor):
         # Changed to fixed from learnable in ViT
         predictor_pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.predictor_embed.out_features)
         self.register_buffer('predictor_pos_embed', predictor_pos_embed)
+        self.is_generative = is_generative
+        self.vocab_size = vocab_size
+        if self.is_generative:
+            self.lm_head = nn.Linear(self.predictor_embed.out_features, self.vocab_size, bias=False)
+        else:
+            self.lm_head = None
 
     def forward(self, x, masks_x, masks):
         assert (masks is not None) and (masks_x is not None), 'Cannot run predictor without mask indices'
@@ -76,7 +82,11 @@ class TextTransformerPredictor(VisionTransformerPredictor):
 
         # -- return preds for mask tokens
         x = x[:, N_ctxt:]
-        x = self.predictor_proj(x)
+
+        if self.is_generative:
+            x = self.lm_head(x)  # generate per-token logits
+        else:
+            x = self.predictor_proj(x)
 
         return x
 

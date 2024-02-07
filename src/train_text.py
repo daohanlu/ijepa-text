@@ -76,14 +76,16 @@ logger = logging.getLogger()
 def load_batch_t5_mlm(batch, device):
     uncorrupted_input_ids = batch['input_ids'].to(device, non_blocking=True)
     noise_mask = batch['noise_mask'].to(device, non_blocking=True)
-    return uncorrupted_input_ids, noise_mask
+    labels = batch['labels'].to(device, non_blocking=True)  # noisy input_ids via BERT-style MLM
+    return uncorrupted_input_ids, noise_mask, labels
 
 
 def load_batch_bert_mlm(batch, device):
     uncorrupted_input_ids = batch['uncorrupted_input_ids'].to(device, non_blocking=True)
     noise_mask = batch['noise_mask'].to(device, non_blocking=True)
     input_ids = batch['input_ids'].to(device, non_blocking=True)  # noisy input_ids via BERT-style MLM
-    return uncorrupted_input_ids, noise_mask, input_ids
+    labels = batch['labels'].to(device, non_blocking=True)  # noisy input_ids via BERT-style MLM
+    return uncorrupted_input_ids, noise_mask, input_ids, labels
 
 
 def make_plot(title, xlabel, ylabel, ys, save_path, scatter=False):
@@ -177,6 +179,7 @@ def main(args, resume_preempt=False):
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
     pred_last_layer_norm = args['meta']['pred_last_layer_norm']
+    is_generative = bool(args['meta'].get('is_generative', False))
     if not torch.cuda.is_available():
         device = torch.device('cpu')
     else:
@@ -269,6 +272,8 @@ def main(args, resume_preempt=False):
         pred_depth=pred_depth,
         pred_emb_dim=pred_emb_dim,
         predictor_last_layer_norm=pred_last_layer_norm,
+        is_generative=is_generative,
+        vocab_size=tokenizer.vocab_size if is_generative else None,
         model_name=model_name,
         n_positions=input_length
     )
@@ -401,9 +406,9 @@ def main(args, resume_preempt=False):
             batch = next(dataloader_iterator)
             # masked_indices: A bool Tensor (B x sequence_length) set to True when the token is masked out.
             if use_bert_mlm:
-                uncorrupted_input_ids, noise_mask, input_ids = load_batch_bert_mlm(batch, device)
+                uncorrupted_input_ids, noise_mask, input_ids, labels = load_batch_bert_mlm(batch, device)
             else:
-                uncorrupted_input_ids, noise_mask = load_batch_t5_mlm(batch, device)
+                uncorrupted_input_ids, noise_mask, labels = load_batch_t5_mlm(batch, device)
 
             def train_step():
                 _new_lr = scheduler.step()
@@ -434,7 +439,10 @@ def main(args, resume_preempt=False):
                     return z
 
                 def loss_fn(z, h):
-                    loss = F.smooth_l1_loss(z, h)
+                    if not is_generative:
+                        loss = F.smooth_l1_loss(z, h)  # feature-space L1 loss
+                    else:
+                        loss = F.cross_entropy(z.view(-1, z.size(-1)), h.view(-1), ignore_index=-100)
                     if vicreg_coeff > 0:
                         encoder_features = z.mean(dim=1)  # -> (batch_size, hidden_size)
                         std_x = torch.sqrt(encoder_features.var(dim=0) + 0.0001)  # var over batch dimension
@@ -450,14 +458,16 @@ def main(args, resume_preempt=False):
 
                 # Step 1. Forward
                 with (torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16)):
-                    h = forward_target()
+                    if not is_generative:
+                        h = forward_target()
+                    else:
+                        # truncate the eos token at the end that is never masked or predicted
+                        h = labels[:, :-1].contiguous()
                     z = forward_context()
                     # shape sanity checks: number of tokens predicted should be target_length - 1
-                    B, N, D = h.shape
-                    assert B == batch_size and N == target_length - 1, \
+                    assert h.shape[0] == batch_size and h.shape[1] == target_length - 1, \
                         f'h shape should be {(batch_size, target_length - 1, "*")}, but got {h.shape}!'
-                    B, N, D = z.shape
-                    assert B == batch_size and N == target_length - 1, \
+                    assert z.shape[0] == batch_size and z.shape[1] == target_length - 1, \
                         f'z shape should be {(batch_size, target_length - 1, "*")}, but got {z.shape}!'
                     loss = loss_fn(z, h)
 
