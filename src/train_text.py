@@ -119,11 +119,12 @@ def check_stats(buffer, h, z, is_random_init):
     z: predicted features. B x N x D"""
     h_buffer = buffer['h']
     z_buffer = buffer['z']
+    trial_num = buffer['trial_num']
     h_buffer.append(h.cpu())
     z_buffer.append(z.cpu())
     assert len(h_buffer) == len(z_buffer)
     num_tokens = 0 if len(h_buffer) == 0 else len(h_buffer) * h_buffer[0].shape[0] * h_buffer[0].shape[1]
-    if num_tokens >= 1024 * 32:
+    if num_tokens >= 1024 * 128:
         logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
         h = torch.concatenate(h_buffer, dim=0)  # concat into a large batch
         z = torch.concatenate(z_buffer, dim=0)  # concat into a large batch
@@ -135,15 +136,29 @@ def check_stats(buffer, h, z, is_random_init):
         mu = h1.mean(dim=0)
         log_det = torch.logdet(cov)
         U, S, V = torch.svd(cov)
-        L = torch.cholesky(cov)
+        cholesky_mesg = "Cholesky success"
+        try:
+            L = torch.cholesky(cov)
+        except torch._C._LinAlgError:
+            cholesky_mesg = "Cholesky failed"
         model_name = 'Random init. model. ' if is_random_init else 'Pre-trained model. '
         save_prefix = 'random_init' if is_random_init else 'pretrained'
-        make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}',
-                  'Sorted Rank', 'Value', S.numpy(), f'plots/{save_prefix}__singular_values.svg')
+        make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}. {cholesky_mesg}',
+                                  'Sorted Rank', 'Value', S.numpy(), f'plots/{save_prefix}__singular_values__triall_{trial_num}.svg')
+        make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}. {cholesky_mesg}',
+                                  'Sorted Rank', 'Value', S.numpy(), f'plots_png/{save_prefix}__singular_values__trial_{trial_num}.png')
         make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
-                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance.svg', scatter=True)
-        logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
-        pdb.set_trace()
+                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance__trial_{trial_num}.svg', scatter=True)
+        make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
+                                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance__trial_{trial_num}.svg', scatter=True)
+        make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
+                                  'Channel', 'Value', var.numpy(), f'plots_png/{save_prefix}__channel_wise_variance__trial_{trial_num}.png', scatter=True)
+        buffer['trial_num'] += 1
+        buffer['h'] = []
+        buffer['z'] = []
+        if buffer['trial_num'] == 10:
+            quit()
+        # pdb.set_trace()
     else:
         pass
 
@@ -340,6 +355,8 @@ def main(args, resume_preempt=False):
             target_encoder=target_encoder,
             opt=optimizer,
             scaler=scaler)
+        if debug_vic:
+            start_epoch = 0
         for _ in range(start_epoch * ipe):
             scheduler.step()
             wd_scheduler.step()
@@ -364,7 +381,7 @@ def main(args, resume_preempt=False):
                 torch.save(save_dict, save_path.format(epoch=f'{epoch}'))
 
     # -- TRAINING LOOP
-    debug_buffer = {'h': [], 'z': []}
+    debug_buffer = {'h': [], 'z': [], 'trial_num': 0}
     itr = 0
     dataloader_iterator = iter(dataloader)
     for epoch in range(start_epoch, num_epochs):
@@ -509,7 +526,8 @@ def main(args, resume_preempt=False):
 
         # -- Save Checkpoint after every epoch
         logger.info(f'avg. loss: {loss_meter.avg:.3f}. Current EMA weight: {current_ema_momentum:.6f}')
-        save_checkpoint(epoch + 1)
+        if not debug_vic:
+            save_checkpoint(epoch + 1)
 
 
 if __name__ == "__main__":
