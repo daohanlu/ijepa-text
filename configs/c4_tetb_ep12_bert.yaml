@@ -6,7 +6,7 @@ data:
   num_workers: 8  # 16
   pin_mem: true
 logging:
-  folder: logs/c4-tetb-bs.64-ep.12-base/
+  folder: logs/c4-tetb-bs.64-ep.12-bert/
   write_tag: ijepa-text
 mask:
   allow_overlap: false
@@ -25,12 +25,12 @@ mask:
   - 0.2
 meta:
   debug_vic: false
-  load_checkpoint: false
+  load_checkpoint: true
   model_name: tet_base
   pred_depth: 12
   pred_emb_dim: 384
   pred_last_layer_norm: true
-  read_checkpoint: null
+  read_checkpoint: logs/c4-tetb-bs.64-ep.12-bert/ijepa-text-ep11.pth.tar
   use_bfloat16: true
 optimization:
   ema:

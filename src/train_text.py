@@ -152,7 +152,7 @@ def main(args, resume_preempt=False):
     # ----------------------------------------------------------------------- #
 
     # -- META
-    debug_vic = args['meta']['debug_vic']
+    debug_vic = bool(args['meta'].get('debug_vic', False))
     use_bfloat16 = args['meta']['use_bfloat16']
     model_name = args['meta']['model_name']
     load_model = args['meta']['load_checkpoint'] or resume_preempt

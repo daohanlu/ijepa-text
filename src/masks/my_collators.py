@@ -145,7 +145,7 @@ class MyDataCollatorForT5MLM:
         batch['noise_mask'] = mask_indices  # True where tokens are masked
         batch['non_noise_mask'] = ~mask_indices  # True where tokens are not masked
         batch['input_ids'] = append_eos(input_ids, self.tokenizer.eos_token_id)
-        labels = input_ids[mask_indices].reshape(batch_size, -1)
+        labels = batch['input_ids'][mask_indices].reshape(batch_size, -1)
         batch['labels'] = append_eos(labels, self.tokenizer.eos_token_id)
 
         if batch["input_ids"].shape[-1] != self.input_length:

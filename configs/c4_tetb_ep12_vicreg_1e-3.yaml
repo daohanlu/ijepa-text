@@ -1,12 +1,12 @@
 data:
-  batch_size: 128
+  batch_size: 64
   input_length: 512
   mlm_probability: 0.15
   mean_noise_span_length: 3.0
-  num_workers: 0  # 16
+  num_workers: 8  # 16
   pin_mem: true
 logging:
-  folder: logs/c4-tetb-bs.32-ep.12-clip-10.0/
+  folder: logs/c4-tetb-bs.64-ep.12-vicreg.1e-3/
   write_tag: ijepa-text
 mask:
   allow_overlap: false
