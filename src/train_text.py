@@ -229,7 +229,11 @@ def main(args, resume_preempt=False):
     latest_path = os.path.join(folder, f'{tag}-latest.pth.tar')
     load_path = None
     if load_model:
-        load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
+        # only add folder to r_file if it is not a complete path
+        if r_file == os.path.basename(r_file) and not os.path.exists(r_file):
+            load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
+        else:
+            load_path = r_file
 
     # -- make csv_logger
     csv_logger = CSVLogger(log_file,
