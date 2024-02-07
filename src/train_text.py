@@ -101,7 +101,7 @@ def make_plot(title, xlabel, ylabel, ys, save_path, scatter=False):
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     # plt.tight_layout()
-    plt.show()
+    # plt.show()
     plt.savefig(save_path)
     plt.close()
 
@@ -113,7 +113,7 @@ def off_diagonal(x):
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
-def check_stats(buffer, h, z):
+def check_stats(buffer, h, z, is_random_init):
     """Checks for mode collapse in terms of features
     h: target features. B x N x D
     z: predicted features. B x N x D"""
@@ -136,10 +136,12 @@ def check_stats(buffer, h, z):
         log_det = torch.logdet(cov)
         U, S, V = torch.svd(cov)
         L = torch.cholesky(cov)
-        make_plot(f'Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}',
-                  'Sorted Rank', 'Value', S.numpy(), 'plots/singular_values.svg')
-        make_plot(f'Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
-                  'Channel', 'Value', var.numpy(), 'plots/channel_wise_variance.svg', scatter=True)
+        model_name = 'Random init. model. ' if is_random_init else 'Pre-trained model. '
+        save_prefix = 'random_init' if is_random_init else 'pretrained'
+        make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}',
+                  'Sorted Rank', 'Value', S.numpy(), f'plots/{save_prefix}__singular_values.svg')
+        make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
+                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance.svg', scatter=True)
         logger.info(f'VIC debug: collected features from {num_tokens} tokens.')
         pdb.set_trace()
     else:
@@ -230,7 +232,7 @@ def main(args, resume_preempt=False):
     load_path = None
     if load_model:
         # only add folder to r_file if it is not a complete path
-        if r_file == os.path.basename(r_file) and not os.path.exists(r_file):
+        if r_file is None or (r_file == os.path.basename(r_file) and not os.path.exists(r_file)):
             load_path = os.path.join(folder, r_file) if r_file is not None else latest_path
         else:
             load_path = r_file
@@ -443,7 +445,7 @@ def main(args, resume_preempt=False):
                     loss = loss_fn(z, h)
 
                 if debug_vic:
-                    check_stats(debug_buffer, h.detach(), z.detach())
+                    check_stats(debug_buffer, h.detach(), z.detach(), not load_model)
 
                 #  Step 2. Backward & step
                 if not debug_vic:
