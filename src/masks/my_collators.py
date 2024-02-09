@@ -420,6 +420,7 @@ def main():
         persistent_workers=False)
     for itr, batch in enumerate(data_loader):
         print('batch keys' + str(list(batch.keys())))
+        print('decoded: ', tokenizer.batch_decode(batch['uncorrupted_input_ids']))
         pdb.set_trace()
 
 

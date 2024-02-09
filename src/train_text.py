@@ -179,6 +179,7 @@ def main(args, resume_preempt=False):
     pred_depth = args['meta']['pred_depth']
     pred_emb_dim = args['meta']['pred_emb_dim']
     pred_last_layer_norm = args['meta']['pred_last_layer_norm']
+    learnable_pos_embeds = args['meta'].get('learnable_pos_embeds', False)
     is_generative = bool(args['meta'].get('is_generative', False))
     if not torch.cuda.is_available():
         device = torch.device('cpu')
@@ -195,17 +196,6 @@ def main(args, resume_preempt=False):
     use_bert_mlm = args['data'].get('use_bert_mlm', False)
     mlm_probability = args['data']['mlm_probability']
     mean_noise_span_length = args['data'].get('mean_noise_span_length', None)
-    # --
-
-    # -- MASK
-    allow_overlap = args['mask']['allow_overlap']  # whether to allow overlap b/w context and target blocks
-    patch_size = args['mask']['patch_size']  # patch-size for model training
-    num_enc_masks = args['mask']['num_enc_masks']  # number of context blocks
-    min_keep = args['mask']['min_keep']  # min number of patches in context block
-    enc_mask_scale = args['mask']['enc_mask_scale']  # scale of context blocks
-    num_pred_masks = args['mask']['num_pred_masks']  # number of target blocks
-    pred_mask_scale = args['mask']['pred_mask_scale']  # scale of target blocks
-    aspect_ratio = args['mask']['aspect_ratio']  # aspect ratio of target blocks
     # --
 
     # -- OPTIMIZATION
@@ -272,6 +262,7 @@ def main(args, resume_preempt=False):
         pred_depth=pred_depth,
         pred_emb_dim=pred_emb_dim,
         predictor_last_layer_norm=pred_last_layer_norm,
+        learnable_pos_embeds=learnable_pos_embeds,
         is_generative=is_generative,
         vocab_size=tokenizer.vocab_size if is_generative else None,
         model_name=model_name,

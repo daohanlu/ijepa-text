@@ -27,14 +27,18 @@ def get_fixed_1d_pos_embed_pytorch(max_len: int, d_model: int) -> torch.Tensor:
 
 
 class TextTransformerPredictor(VisionTransformerPredictor):
-    def __init__(self, n_positions=512, is_generative=False, vocab_size=None, **kwargs):
+    def __init__(self, n_positions=512, is_generative=False, learnable_pos_embeds=False, vocab_size=None, **kwargs):
         kwargs['num_patches'] = 0
         super().__init__(**kwargs)
         self.n_positions = n_positions
         del self.predictor_pos_embed
         # Changed to fixed from learnable in ViT
         predictor_pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.predictor_embed.out_features)
-        self.register_buffer('predictor_pos_embed', predictor_pos_embed)
+        if learnable_pos_embeds:
+            self.predictor_pos_embed = nn.Parameter(predictor_pos_embed)
+        else:
+            # register buffer so this gets sent to GPU when calling .cuda().
+            self.register_buffer('predictor_pos_embed', predictor_pos_embed)
         self.is_generative = is_generative
         self.vocab_size = vocab_size
         if self.is_generative:
@@ -55,7 +59,7 @@ class TextTransformerPredictor(VisionTransformerPredictor):
         B, N, _ = x.shape
         D_predictor = self.predictor_embed.out_features
 
-        # -- map from encoder-dim to predictor-dim and remove masked tokens
+        # -- map from encoder-dim to predictor-dim
         x = self.predictor_embed(x)
 
         # -- add positional embedding to x tokens
@@ -98,6 +102,7 @@ class TextTransformer(VisionTransformer):
             self,
             n_positions=512,
             vocab_size=32128,
+            learnable_pos_embeds=False,
             **kwargs
     ):
         kwargs['num_patches'] = 0
@@ -106,10 +111,13 @@ class TextTransformer(VisionTransformer):
         del self.pos_embed
         self.n_positions = n_positions
         self.token_embed = nn.Embedding(vocab_size, self.embed_dim)
-        # Changed to fixed from learnable in ViT
         pos_embed = get_fixed_1d_pos_embed_pytorch(self.n_positions, self.embed_dim)  # (1, num_patches, embed_dim)
-        # register buffer so this gets sent to GPU when calling .cuda().
-        self.register_buffer('pos_embed', pos_embed)
+        if learnable_pos_embeds:
+            self.pos_embed = nn.Parameter(pos_embed)
+        else:
+            # register buffer so this gets sent to GPU when calling .cuda().
+            self.register_buffer('pos_embed', pos_embed)
+
 
     def forward(self, x, masks=None):
         if masks is not None:
