@@ -414,7 +414,6 @@ def main():
         legacy=False,
     )
 
-    args = None
     with open(model_args.config_name, 'r') as y_file:
         args = yaml.load(y_file, Loader=yaml.FullLoader)
         logger.info('loaded params...')
@@ -442,7 +441,6 @@ def main():
         target_encoder=None,
         opt=None,
         scaler=None)
-
     class MyT5ClassificationHead(torch.nn.Module):
         """Head for sentence-level classification tasks.
         https://github.com/huggingface/transformers/blob/v4.37.2/src/transformers/models/t5/modeling_t5.py#L775"""

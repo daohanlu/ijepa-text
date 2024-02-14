@@ -115,7 +115,7 @@ def off_diagonal(x):
     return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
 
-def check_stats(buffer, h, z, is_random_init):
+def check_stats(buffer, h, z, is_random_init, experiment_name):
     """Checks for mode collapse in terms of features
     h: target features. B x N x D
     z: predicted features. B x N x D"""
@@ -140,21 +140,26 @@ def check_stats(buffer, h, z, is_random_init):
         U, S, V = torch.svd(cov)
         cholesky_mesg = "Cholesky success"
         try:
-            L = torch.cholesky(cov)
+            L = torch.linalg.cholesky(cov)
         except torch._C._LinAlgError:
             cholesky_mesg = "Cholesky failed"
         model_name = 'Random init. model. ' if is_random_init else 'Pre-trained model. '
         save_prefix = 'random_init' if is_random_init else 'pretrained'
+        if is_random_init:
+            experiment_name = 'random_init'
+        svg_folder = os.path.join('plots', experiment_name)
+        png_folder = os.path.join('plots_png', experiment_name)
+        print('experiment name: ', experiment_name)
+        os.makedirs(svg_folder, exist_ok=True)
+        os.makedirs(png_folder, exist_ok=True)
         make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}. {cholesky_mesg}',
-                                  'Sorted Rank', 'Value', S.numpy(), f'plots/{save_prefix}__singular_values__triall_{trial_num}.svg')
+                                  'Sorted Rank', 'Value', S.numpy(), f'{svg_folder}/{save_prefix}__singular_values__trial_{trial_num}.svg')
         make_plot(f'{model_name} Singular values. Condition number={S.max() / S.min():.3e}. Log det={log_det}. {cholesky_mesg}',
-                                  'Sorted Rank', 'Value', S.numpy(), f'plots_png/{save_prefix}__singular_values__trial_{trial_num}.png')
+                                  'Sorted Rank', 'Value', S.numpy(), f'{png_folder}/{save_prefix}__singular_values__trial_{trial_num}.png')
         make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
-                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance__trial_{trial_num}.svg', scatter=True)
+                                  'Channel', 'Value', var.numpy(), f'{svg_folder}/{save_prefix}__channel_wise_variance__trial_{trial_num}.svg', scatter=True)
         make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
-                                  'Channel', 'Value', var.numpy(), f'plots/{save_prefix}__channel_wise_variance__trial_{trial_num}.svg', scatter=True)
-        make_plot(f'{model_name} Channel-wise Variance. max={var.max():.3e}, min={var.min():.3e}',
-                                  'Channel', 'Value', var.numpy(), f'plots_png/{save_prefix}__channel_wise_variance__trial_{trial_num}.png', scatter=True)
+                                  'Channel', 'Value', var.numpy(), f'{png_folder}/{save_prefix}__channel_wise_variance__trial_{trial_num}.png', scatter=True)
         buffer['trial_num'] += 1
         buffer['h'] = []
         buffer['z'] = []
@@ -211,6 +216,13 @@ def main(args, resume_preempt=False):
     final_lr = args['optimization']['final_lr']
     clip_grad_norm = args['optimization']['clip_grad_norm']
     vicreg_coeff = float(args['optimization'].get('vicreg_coeff', 0.0))
+    vicreg_coeff_var = float(args['optimization'].get('vicreg_coeff_var', 0.0))
+    vicreg_coeff_cov = float(args['optimization'].get('vicreg_coeff_cov', 0.0))
+    if vicreg_coeff > 0:
+        assert vicreg_coeff_var == vicreg_coeff_cov == 0, \
+            'cannot set combined vicreg coefficient when var and cov coefficients are specified.'
+        vicreg_coeff_var = vicreg_coeff * 1.0
+        vicreg_coeff_cov = vicreg_coeff * 0.04  # default 1/25 scaling for cov reg
 
     # -- LOGGING
     folder = args['logging']['folder']
@@ -434,15 +446,14 @@ def main(args, resume_preempt=False):
                         loss = F.smooth_l1_loss(z, h)  # feature-space L1 loss
                     else:
                         loss = F.cross_entropy(z.view(-1, z.size(-1)), h.view(-1), ignore_index=-100)
-                    if vicreg_coeff > 0:
+                    if vicreg_coeff_var > 0 or vicreg_coeff_cov > 0:
                         encoder_features = z.mean(dim=1)  # -> (batch_size, hidden_size)
                         std_x = torch.sqrt(encoder_features.var(dim=0) + 0.0001)  # var over batch dimension
                         cov_x = (encoder_features.T @ encoder_features) / (batch_size - 1)  # cov over batch dimension
                         std_loss = torch.mean(F.relu(1 - std_x)) / 2
                         cov_loss = off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1])  # divide by hidden states dim
                         # see https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py defaults
-                        var_and_cov_loss = vicreg_coeff * (
-                                std_loss + 0.04 * cov_loss)  # cov_loss is divided by 25 as per default
+                        var_and_cov_loss = vicreg_coeff_var * std_loss + vicreg_coeff_cov * cov_loss
                         loss += var_and_cov_loss
                     loss = AllReduce.apply(loss)
                     return loss
@@ -463,7 +474,11 @@ def main(args, resume_preempt=False):
                     loss = loss_fn(z, h)
 
                 if debug_vic:
-                    check_stats(debug_buffer, h.detach(), z.detach(), not load_model)
+                    if not load_model:
+                        experiment_name = None
+                    else:
+                        experiment_name = os.path.basename(folder.rstrip("/"))
+                    check_stats(debug_buffer, h.detach(), z.detach(), not load_model, experiment_name)
 
                 #  Step 2. Backward & step
                 if not debug_vic:

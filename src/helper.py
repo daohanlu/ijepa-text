@@ -29,26 +29,28 @@ def load_checkpoint(
     target_encoder,
     opt,
     scaler,
+    strict=True,
 ):
     try:
+        assert r_path is not None and r_path.strip() != ''
         checkpoint = torch.load(r_path, map_location=device)
         epoch = checkpoint['epoch']
 
         # -- loading encoder
         pretrained_dict = checkpoint['encoder']
-        msg = encoder.load_state_dict(pretrained_dict)
+        msg = encoder.load_state_dict(pretrained_dict, strict=strict)
         logger.info(f'loaded pretrained encoder from epoch {epoch} with msg: {msg}')
 
         # -- loading predictor
         pretrained_dict = checkpoint['predictor']
-        msg = predictor.load_state_dict(pretrained_dict)
+        msg = predictor.load_state_dict(pretrained_dict, strict=strict)
         logger.info(f'loaded pretrained encoder from epoch {epoch} with msg: {msg}')
 
         # -- loading target_encoder
         if target_encoder is not None:
             print(list(checkpoint.keys()))
             pretrained_dict = checkpoint['target_encoder']
-            msg = target_encoder.load_state_dict(pretrained_dict)
+            msg = target_encoder.load_state_dict(pretrained_dict, strict=strict)
             logger.info(f'loaded pretrained encoder from epoch {epoch} with msg: {msg}')
 
         # -- loading optimizer
