@@ -177,6 +177,7 @@ def main(args, resume_preempt=False):
 
     # -- META
     debug_vic = bool(args['meta'].get('debug_vic', False))
+    debug_vic_losses = bool(args['meta'].get('debug_vic_losses', False))
     use_bfloat16 = args['meta']['use_bfloat16']
     model_name = args['meta']['model_name']
     load_model = args['meta']['load_checkpoint'] or resume_preempt
@@ -228,10 +229,11 @@ def main(args, resume_preempt=False):
     folder = args['logging']['folder']
     tag = args['logging']['write_tag']
 
-    dump = os.path.join(folder, 'params-ijepa.yaml')
-    os.makedirs(folder, exist_ok=True)
-    with open(dump, 'w') as f:
-        yaml.dump(args, f)
+    if not (debug_vic or debug_vic_losses):
+        dump = os.path.join(folder, 'params-ijepa.yaml')
+        os.makedirs(folder, exist_ok=True)
+        with open(dump, 'w') as f:
+            yaml.dump(args, f)
     # ----------------------------------------------------------------------- #
 
     try:
@@ -246,7 +248,12 @@ def main(args, resume_preempt=False):
         logger.setLevel(logging.ERROR)
 
     # -- log/checkpointing paths
-    log_file = os.path.join(folder, f'{tag}_r{rank}.csv')
+    if debug_vic:
+        log_file = os.path.join(folder, f'{tag}_r{rank}_debug_vic.csv')
+    elif debug_vic_losses:
+        log_file = os.path.join(folder, f'{tag}_r{rank}_debug_vic_losses.csv')
+    else:
+        log_file = os.path.join(folder, f'{tag}_r{rank}.csv')
     save_path = os.path.join(folder, f'{tag}' + '-ep{epoch}.pth.tar')
     latest_path = os.path.join(folder, f'{tag}-latest.pth.tar')
     load_path = None
@@ -262,8 +269,8 @@ def main(args, resume_preempt=False):
                            ('%d', 'epoch'),
                            ('%d', 'itr'),
                            ('%.5f', 'loss'),
-                           ('%.5f', 'mask-A'),
-                           ('%.5f', 'mask-B'),
+                           ('%.5f', 'VIC-var'),
+                           ('%.5f', 'VIC-cov'),
                            ('%d', 'time (ms)'))
 
     # -- init model
@@ -326,6 +333,8 @@ def main(args, resume_preempt=False):
         tokenizer=tokenizer
     )
     ipe = iterations_per_epoch
+    if debug_vic_losses:
+        ipe /= 50  # when debugging vic losses, run fewer iters per epoch
 
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
@@ -363,8 +372,6 @@ def main(args, resume_preempt=False):
             target_encoder=target_encoder,
             opt=optimizer,
             scaler=scaler)
-        if debug_vic:
-            start_epoch = 0
         for _ in range(start_epoch * ipe):
             scheduler.step()
             wd_scheduler.step()
@@ -394,13 +401,24 @@ def main(args, resume_preempt=False):
     dataloader_iterator = iter(dataloader)
     for epoch in range(start_epoch, num_epochs):
         logger.info('Epoch %d' % (epoch + 1))
+        if debug_vic_losses:
+            # load saved model at each epoch
+            load_model_epoch = save_path.format(epoch=f'{epoch}')
+            encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
+                device=device,
+                r_path=load_model_epoch,
+                encoder=encoder,
+                predictor=predictor,
+                target_encoder=target_encoder,
+                opt=optimizer,
+                scaler=scaler)
 
         # -- update distributed-data-loader epoch
         # unsupervised_sampler.set_epoch(epoch)
 
         loss_meter = AverageMeter()
-        maskA_meter = AverageMeter()
-        maskB_meter = AverageMeter()
+        var_meter = AverageMeter()
+        cov_meter = AverageMeter()
         time_meter = AverageMeter()
 
         # for itr, batch in enumerate(dataloader):
@@ -450,13 +468,15 @@ def main(args, resume_preempt=False):
                         encoder_features = z.mean(dim=1)  # -> (batch_size, hidden_size)
                         std_x = torch.sqrt(encoder_features.var(dim=0) + 0.0001)  # var over batch dimension
                         cov_x = (encoder_features.T @ encoder_features) / (batch_size - 1)  # cov over batch dimension
-                        std_loss = torch.mean(F.relu(1 - std_x)) / 2
-                        cov_loss = off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1])  # divide by hidden states dim
+                        std_loss = vicreg_coeff_var * (torch.mean(F.relu(1 - std_x)) / 2)
+                        cov_loss = vicreg_coeff_cov * (off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1]))  # divide by hidden states dim
                         # see https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py defaults
-                        var_and_cov_loss = vicreg_coeff_var * std_loss + vicreg_coeff_cov * cov_loss
-                        loss += var_and_cov_loss
+                        loss += std_loss + cov_loss
+                    else:
+                        std_loss = 0
+                        cov_loss = 0
                     loss = AllReduce.apply(loss)
-                    return loss
+                    return loss, std_loss, cov_loss
 
                 # Step 1. Forward
                 with (torch.cuda.amp.autocast(dtype=torch.bfloat16, enabled=use_bfloat16)):
@@ -471,7 +491,7 @@ def main(args, resume_preempt=False):
                         f'h shape should be {(batch_size, target_length - 1, "*")}, but got {h.shape}!'
                     assert z.shape[0] == batch_size and z.shape[1] == target_length - 1, \
                         f'z shape should be {(batch_size, target_length - 1, "*")}, but got {z.shape}!'
-                    loss = loss_fn(z, h)
+                    loss, std_loss, cov_loss = loss_fn(z, h)
 
                 if debug_vic:
                     if not load_model:
@@ -481,7 +501,7 @@ def main(args, resume_preempt=False):
                     check_stats(debug_buffer, h.detach(), z.detach(), not load_model, experiment_name)
 
                 #  Step 2. Backward & step
-                if not debug_vic:
+                if not (debug_vic or debug_vic_losses):
                     if use_bfloat16:
                         scaler.scale(loss).backward()
                         if clip_grad_norm > 0:
@@ -504,15 +524,17 @@ def main(args, resume_preempt=False):
                     for param_q, param_k in zip(encoder.parameters(), target_encoder.parameters()):
                         param_k.data.mul_(m).add_((1. - m) * param_q.detach().data)
 
-                return float(loss), _new_lr, _new_wd, grad_stats, m
+                return float(loss), float(std_loss), float(cov_loss), _new_lr, _new_wd, grad_stats, m
 
-            (loss, _new_lr, _new_wd, grad_stats, current_ema_momentum), etime = gpu_timer(train_step)
+            (loss, std_loss, cov_loss, _new_lr, _new_wd, grad_stats, current_ema_momentum), etime = gpu_timer(train_step)
             loss_meter.update(loss)
+            var_meter.update(std_loss)
+            cov_meter.update(cov_loss)
             time_meter.update(etime)
 
             # -- Logging
             def log_stats():
-                csv_logger.log(epoch + 1, itr, loss, maskA_meter.val, maskB_meter.val, etime)
+                csv_logger.log(epoch + 1, itr, loss, var_meter.val, cov_meter.val, etime)
                 if (itr % log_freq == 0) or np.isnan(loss) or np.isinf(loss):
                     logger.info('[%d, %5d] loss: %.3f '
                                 'masks: %.1f %.1f '
@@ -521,8 +543,8 @@ def main(args, resume_preempt=False):
                                 '(%.1f ms)'
                                 % (epoch + 1, itr,
                                    loss_meter.avg,
-                                   maskA_meter.avg,
-                                   maskB_meter.avg,
+                                   var_meter.avg,
+                                   cov_meter.avg,
                                    _new_wd,
                                    _new_lr,
                                    torch.cuda.max_memory_allocated() / 1024. ** 2,
