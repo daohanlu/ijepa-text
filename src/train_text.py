@@ -334,7 +334,7 @@ def main(args, resume_preempt=False):
     )
     ipe = iterations_per_epoch
     if debug_vic_losses:
-        ipe /= 50  # when debugging vic losses, run fewer iters per epoch
+        ipe = round(ipe / 50)  # when debugging vic losses, run fewer iters per epoch
 
     # -- init optimizer and scheduler
     optimizer, scaler, scheduler, wd_scheduler = init_opt(
@@ -363,7 +363,7 @@ def main(args, resume_preempt=False):
 
     start_epoch = 0
     # -- load training checkpoint
-    if load_model:
+    if load_model and not debug_vic_losses:
         encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
             device=device,
             r_path=load_path,
@@ -372,6 +372,8 @@ def main(args, resume_preempt=False):
             target_encoder=target_encoder,
             opt=optimizer,
             scaler=scaler)
+        if debug_vic:
+            start_epoch = 0
         for _ in range(start_epoch * ipe):
             scheduler.step()
             wd_scheduler.step()
@@ -403,7 +405,7 @@ def main(args, resume_preempt=False):
         logger.info('Epoch %d' % (epoch + 1))
         if debug_vic_losses:
             # load saved model at each epoch
-            load_model_epoch = save_path.format(epoch=f'{epoch}')
+            load_model_epoch = save_path.format(epoch=f'{epoch + 1}')
             encoder, predictor, target_encoder, optimizer, scaler, start_epoch = load_checkpoint(
                 device=device,
                 r_path=load_model_epoch,
@@ -412,6 +414,7 @@ def main(args, resume_preempt=False):
                 target_encoder=target_encoder,
                 opt=optimizer,
                 scaler=scaler)
+            logger.info('VICReg Debug: loaded model at ' + load_model_epoch)
 
         # -- update distributed-data-loader epoch
         # unsupervised_sampler.set_epoch(epoch)
@@ -468,10 +471,11 @@ def main(args, resume_preempt=False):
                         encoder_features = z.mean(dim=1)  # -> (batch_size, hidden_size)
                         std_x = torch.sqrt(encoder_features.var(dim=0) + 0.0001)  # var over batch dimension
                         cov_x = (encoder_features.T @ encoder_features) / (batch_size - 1)  # cov over batch dimension
-                        std_loss = vicreg_coeff_var * (torch.mean(F.relu(1 - std_x)) / 2)
-                        cov_loss = vicreg_coeff_cov * (off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1]))  # divide by hidden states dim
+                        std_loss = torch.mean(F.relu(1 - std_x)) / 2
+                        cov_loss = off_diagonal(cov_x).pow_(2).sum().div(z.shape[-1])  # divide by hidden states dim
                         # see https://github.com/facebookresearch/vicreg/blob/main/main_vicreg.py defaults
-                        loss += std_loss + cov_loss
+                        logger.info(f'std_loss {float(std_loss)}; cov_loss {float(cov_loss)}')
+                        loss += vicreg_coeff_var * std_loss + vicreg_coeff_cov * cov_loss
                     else:
                         std_loss = 0
                         cov_loss = 0
@@ -537,7 +541,7 @@ def main(args, resume_preempt=False):
                 csv_logger.log(epoch + 1, itr, loss, var_meter.val, cov_meter.val, etime)
                 if (itr % log_freq == 0) or np.isnan(loss) or np.isinf(loss):
                     logger.info('[%d, %5d] loss: %.3f '
-                                'masks: %.1f %.1f '
+                                'var_reg: %.6f cov_reg %.6f '
                                 '[wd: %.2e] [lr: %.2e] '
                                 '[mem: %.2e] '
                                 '(%.1f ms)'
@@ -563,7 +567,7 @@ def main(args, resume_preempt=False):
             assert not np.isnan(loss), 'loss is nan'
 
         # -- Save Checkpoint after every epoch
-        logger.info(f'avg. loss: {loss_meter.avg:.3f}. Current EMA weight: {current_ema_momentum:.6f}')
+        logger.info(f'avg. loss: {loss_meter.avg:.3f}. var_reg:{var_meter.avg}. cov_reg:{cov_meter.avg}. Current EMA weight: {current_ema_momentum:.6f}')
         if not debug_vic:
             save_checkpoint(epoch + 1)
 
