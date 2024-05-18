@@ -561,14 +561,16 @@ def main(args, resume_preempt=False):
                                        grad_stats.last_layer,
                                        grad_stats.min,
                                        grad_stats.max))
-
-            log_stats()
+            if not debug_vic_losses:
+                log_stats()
             itr += 1
             assert not np.isnan(loss), 'loss is nan'
 
         # -- Save Checkpoint after every epoch
+        if debug_vic_losses:
+            log_stats()
         logger.info(f'avg. loss: {loss_meter.avg:.3f}. var_reg:{var_meter.avg}. cov_reg:{cov_meter.avg}. Current EMA weight: {current_ema_momentum:.6f}')
-        if not debug_vic:
+        if not (debug_vic or debug_vic_losses):
             save_checkpoint(epoch + 1)
 
 

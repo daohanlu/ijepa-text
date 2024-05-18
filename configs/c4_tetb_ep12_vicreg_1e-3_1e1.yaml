@@ -1,0 +1,51 @@
+data:
+  batch_size: 64
+  input_length: 512
+  mlm_probability: 0.15
+  mean_noise_span_length: 3.0
+  num_workers: 8  # 16
+  pin_mem: true
+logging:
+  folder: logs/c4-tetb-bs.64-ep.12-vicreg.1e-3.1e1/
+  write_tag: ijepa-text
+mask:
+  allow_overlap: false
+  aspect_ratio:
+  - 0.75
+  - 1.5
+  enc_mask_scale:
+  - 0.85
+  - 1.0
+  min_keep: 10
+  num_enc_masks: 1
+  num_pred_masks: 4
+  patch_size: 14
+  pred_mask_scale:
+  - 0.15
+  - 0.2
+meta:
+  debug_vic: false
+  debug_vic_losses: false
+  load_checkpoint: false
+  model_name: tet_base
+  pred_depth: 12
+  pred_emb_dim: 384
+  pred_last_layer_norm: true
+  read_checkpoint: null
+  use_bfloat16: true
+optimization:
+  ema:
+  - 0.996
+  - 1.0
+  epochs: 12
+  iterations_per_epoch: 5000
+  final_lr: 1.0e-06
+  final_weight_decay: 0.4
+  ipe_scale: 1.0
+  lr: 0.001
+  start_lr: 0.0002
+  warmup: 1
+  weight_decay: 0.04
+  clip_grad_norm: -1
+  vicreg_coeff_var: 1.0e-3
+  vicreg_coeff_cov: 10.0
